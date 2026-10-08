@@ -1,0 +1,11 @@
+build/
+.venv/
+models/
+work/
+output/
+debug/
+.aws
+.codex/
+.agents/
+__pycache__/
+*.pyc
