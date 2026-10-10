@@ -138,6 +138,8 @@ Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
 Thanh bên cho phép đổi giữa `modelv1` (GGUF 4B, nhẹ hơn) và `modelv2` (GGUF 8B, mặc định), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 
+Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B`, nhưng vẫn yêu cầu 4 lựa chọn, một đáp án hợp lệ và dẫn chứng có trong tài liệu để đề chấm được. Tắt **Kiểm tra đáp án bằng AI** để tạo bản nháp nhanh hơn; giảng viên phải rà soát đáp án trước khi giao bài. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
+
 Model được cache để tạo đề, verifier và chat dùng cùng một bản trong RAM. Chạy CPU với 8B có thể chậm; dùng GGUF 4B hoặc GPU nếu có.
 
 ### Chạy toàn pipeline

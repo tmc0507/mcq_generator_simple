@@ -46,6 +46,15 @@ def test_parsing_and_validation():
     assert item["source_type"]["enum"] == ["page"]
     broken = {**QUESTION, "correct_answer": []}
     assert pipeline.validate_mcq(broken, {("page", 1)})
+    repaired = pipeline.normalize_mcq_format(
+        {**QUESTION, "choices": ["Đúng", "Sai 1", "Sai 2", "Sai 3"],
+         "correct_answer": "a.", "source_index": "1", "source_type": "PAGE",
+         "difficulty": "Easy"},
+        {"source_types": ["page"], "source_indices": [1]},
+    )
+    assert not pipeline.validate_mcq(repaired, {("page", 1)})
+    assert repaired["choices"]["A"] == "Đúng"
+    assert pipeline.validate_mcq({**repaired, "correct_answer": "E"}, {("page", 1)})
 
     class RetryBackend:
         calls = 0

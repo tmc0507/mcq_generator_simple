@@ -70,6 +70,40 @@ def mcq_schema_for_chunk(chunk):
     return schema
 
 
+def normalize_mcq_format(question, chunk):
+    """Repair presentation-only model mistakes before strict validation."""
+    if not isinstance(question, dict):
+        return question
+    question = dict(question)
+    choices = question.get("choices")
+    if isinstance(choices, list) and len(choices) == 4:
+        question["choices"] = dict(zip("ABCD", choices))
+    elif isinstance(choices, dict):
+        question["choices"] = {
+            re.sub(r"[.):\s]+$", "", str(key)).upper(): value
+            for key, value in choices.items()
+        }
+    answer = question.get("correct_answer")
+    if isinstance(answer, str):
+        match = re.fullmatch(r"\s*([A-Da-d])[.):\s]*", answer)
+        if match:
+            question["correct_answer"] = match.group(1).upper()
+    index = question.get("source_index")
+    if isinstance(index, str) and index.strip().isdigit():
+        question["source_index"] = int(index.strip())
+    elif index is None and len(set(chunk["source_indices"])) == 1:
+        question["source_index"] = chunk["source_indices"][0]
+    source_type = question.get("source_type")
+    if isinstance(source_type, str):
+        question["source_type"] = source_type.strip().lower()
+    elif source_type is None and len(set(chunk["source_types"])) == 1:
+        question["source_type"] = chunk["source_types"][0]
+    difficulty = question.get("difficulty")
+    if isinstance(difficulty, str):
+        question["difficulty"] = difficulty.strip().lower()
+    return question
+
+
 def normalize_text(text: str) -> str:
     text = unicodedata.normalize("NFKC", text or "").lower()
     text = text.replace("\u00ad", "")
@@ -544,6 +578,7 @@ def main():
         print(f"  Generated: {len(qs)}")
 
         for question_index, q in enumerate(qs, 1):
+            q = normalize_mcq_format(q, chunk)
             issues = validate_mcq(q, valid_sources)
             if issues:
                 rejected.append({"reason": "structure", "issues": issues, "question": q})
@@ -588,6 +623,7 @@ def main():
                 if not isinstance(final_q, dict):
                     rejected.append({"reason": "revision_missing", "question": q})
                     continue
+                final_q = normalize_mcq_format(final_q, chunk)
                 issues2 = validate_mcq(final_q, valid_sources)
                 if issues2:
                     rejected.append({"reason": "revision_structure", "issues": issues2, "question": final_q})

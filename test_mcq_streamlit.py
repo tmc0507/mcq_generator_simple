@@ -43,8 +43,11 @@ def test_app():
     app = AppTest.from_file("mcq_streamlit.py").run(timeout=30)
     assert not app.exception, app.exception
     assert app.chat_input[0].proto.accept_file
+    assert str(app.chat_input[0].proto.submit_mode) == "2"
     assert set(app.chat_input[0].proto.file_type) == {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv"}
     assert app.selectbox[0].value in {"modelv1", "modelv2"}
+    assert app.toggle[0].label == "Kiểm tra đáp án bằng AI"
+    assert app.toggle[0].value is True
     assert app.text_area[0].value
     app.chat_input[0].set_value("Tạo 3 câu hỏi").run(timeout=30)
     assert not app.exception, app.exception
@@ -136,9 +139,45 @@ def test_exam_file_and_count():
             assert mcq_streamlit.EXAM.is_file() and mcq_streamlit.EXAM_TXT.is_file()
             assert mcq_streamlit.EXAM_TXT.read_text(encoding="utf-8") == format_exam_txt(exam)
             assert "Đáp án:" not in format_exam_txt(exam)
+            snapshots = []
+            fast_exam = create_exam(uploaded, model_path, 1, "{source}", verify=False,
+                                    on_question=lambda partial: snapshots.append(partial["accepted_questions"]))
+            assert snapshots == [1]
+            assert fast_exam["verification_enabled"] is False
+            assert fast_exam["questions"][0]["verifier_status"] == "SKIPPED"
+            assert "BẢN NHÁP" in format_exam_txt(fast_exam)
     finally:
         (mcq_streamlit.EXAM, mcq_streamlit.EXAM_TXT,
          mcq_streamlit.OUTPUT, mcq_streamlit.extract, mcq_streamlit.load_model) = originals
+
+
+def test_stopped_exam_is_kept_in_chat():
+    with tempfile.TemporaryDirectory() as directory:
+        script = f'''import mcq_streamlit as app
+from pathlib import Path
+app.EXAM = Path({str(Path(directory) / "questions.json")!r})
+app.EXAM_TXT = Path({str(Path(directory) / "questions.txt")!r})
+app.main()
+'''
+        question = {"id": 1, "question": "Dữ kiện gốc là gì?",
+                    "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+                    "correct_answer": "A", "concept": "ví dụ", "difficulty": "easy",
+                    "explanation": "Dữ kiện gốc.", "evidence": "Dữ kiện gốc.",
+                    "source_type": "page", "source_index": 1}
+        exam = {"document": "sample.csv", "requested_questions": 3,
+                "accepted_questions": 1, "generation_stats": {}, "questions": [question]}
+        app = AppTest.from_string(script).run(timeout=30)
+        app.session_state["partial_exam"] = exam
+        app.session_state["generating_exam"] = True
+        app.session_state["messages"] = [{"role": "user", "content": "Tạo 3 câu hỏi"}]
+        app.run(timeout=30)
+        assert not app.exception, app.exception
+        assert "Đã dừng tạo đề" in app.chat_message[-2].markdown[0].value
+        assert Path(directory, "questions.json").is_file()
+        assert "Dữ kiện gốc" in Path(directory, "questions.txt").read_text(encoding="utf-8")
+        app.session_state["generating_exam"] = True
+        app.run(timeout=30)
+        assert "trước khi có câu hỏi" in app.chat_message[-1].markdown[0].value
 
 
 def test_scoring_and_teacher_chat():
@@ -241,6 +280,7 @@ def test_attempts_are_saved():
 if __name__ == "__main__":
     test_app()
     test_exam_file_and_count()
+    test_stopped_exam_is_kept_in_chat()
     test_scoring_and_teacher_chat()
     test_one_chat_from_exam_to_review()
     test_ui_generation_rechecks_revision()

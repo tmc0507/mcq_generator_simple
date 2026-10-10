@@ -37,6 +37,7 @@ from generate_mcq import (  # noqa: E402
     build_verifier_prompt,
     VERIFY_SCHEMA,
     allocate_questions,
+    normalize_mcq_format,
 )
 
 
@@ -136,6 +137,7 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
         if not questions:
             stats["empty"] = stats.get("empty", 0) + 1
         for question in questions[:batch_size]:
+            question = normalize_mcq_format(question, chunk)
             if validate_mcq(question, source_map):
                 stats["structure"] = stats.get("structure", 0) + 1
                 continue
@@ -150,6 +152,8 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                 stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
             if verify:
+                if on_attempt:
+                    on_attempt(attempt, len(accepted))
                 try:
                     verdict = ask_json(
                         llm,
@@ -162,7 +166,7 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                     continue
                 status = verdict.get("status")
                 if status == "REVISE":
-                    revised = verdict.get("corrected_question")
+                    revised = normalize_mcq_format(verdict.get("corrected_question"), chunk)
                     if validate_mcq(revised, source_map):
                         stats["revision"] = stats.get("revision", 0) + 1
                         continue
@@ -179,6 +183,8 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                     stats["verifier_reject"] = stats.get("verifier_reject", 0) + 1
                     continue
                 question["verifier_status"] = status
+            else:
+                question["verifier_status"] = "SKIPPED"
             question["evidence_score"] = round(evidence_score(question["evidence"], source_map[source_key]), 4)
             if len(deduplicate(accepted + [question])) == len(accepted):
                 stats["duplicate"] = stats.get("duplicate", 0) + 1
@@ -220,6 +226,8 @@ def question_count(prompt):
 
 def format_exam_txt(exam):
     lines = [f"BỘ ĐỀ: {exam['document']}", f"Số câu: {len(exam['questions'])}", ""]
+    if exam.get("verification_enabled") is False:
+        lines.insert(1, "BẢN NHÁP: Chưa kiểm tra đáp án bằng AI; giảng viên cần rà soát.")
     for position, question in enumerate(exam["questions"], 1):
         lines.append(f"Câu {position}. {question['question']}")
         lines.extend(f"{letter}. {question['choices'][letter]}" for letter in "ABCD")
@@ -227,7 +235,7 @@ def format_exam_txt(exam):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def create_exam(uploaded, model_path, count, template, on_attempt=None):
+def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=True, on_question=None):
     if not Path(model_path).is_file():
         raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
     document_name = Path(uploaded.name).name
@@ -241,18 +249,21 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None):
     questions = []
     results = []
     stats = {}
-    for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=True, stats=stats):
+    exam = {
+        "document": document_name, "backend": "llama_cpp", "model": str(model_path),
+        "requested_questions": count, "accepted_questions": 0,
+        "generation_stats": stats, "verification_enabled": verify, "questions": questions,
+    }
+    for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=verify, stats=stats):
         question["id"] = len(questions) + 1
         question["source"] = {"type": question["source_type"], "index": question["source_index"]}
         questions.append(question)
         results.append(format_question(document_name, question, prompt))
+        exam["accepted_questions"] = len(questions)
+        if on_question:
+            on_question(exam)
     if not questions:
         raise ValueError("Không tạo được câu hỏi có căn cứ; thử tài liệu có nhiều nội dung hơn.")
-    exam = {
-        "document": document_name, "backend": "llama_cpp", "model": str(model_path),
-        "requested_questions": count, "accepted_questions": len(questions),
-        "generation_stats": stats, "questions": questions,
-    }
     write_json(EXAM, exam)
     save_results(results)
     EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
@@ -360,6 +371,8 @@ def render_exam_message(message):
     exam = message["exam"]
     with st.chat_message("assistant", avatar="🎓"):
         st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải đề TXT hoặc làm bài ngay dưới đây.")
+        if exam.get("verification_enabled") is False:
+            st.info("Bản nháp nhanh: chưa kiểm tra đáp án và giải thích bằng AI. Giảng viên nên rà soát trước khi giao bài.")
         if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
             stats = exam.get("generation_stats", {})
             st.warning(
@@ -420,9 +433,24 @@ def render_exam_message(message):
             st.rerun()
 
 
-def chat_view(model_path, template):
+def chat_view(model_path, template, verify=True):
     st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu bằng dấu +, làm bài và hỏi tiếp ngay tại đây.</p></div>', unsafe_allow_html=True)
     messages = st.session_state.setdefault("messages", [])
+    stopped = st.session_state.pop("generating_exam", False)
+    partial = st.session_state.pop("partial_exam", None)
+    if partial:
+        partial["generation_stats"]["accepted"] = len(partial["questions"])
+        partial["stopped"] = True
+        write_json(EXAM, partial)
+        EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
+        EXAM_TXT.write_text(format_exam_txt(partial), encoding="utf-8")
+        messages.append({"role": "assistant", "content":
+                         f"Đã dừng tạo đề. Giữ lại {len(partial['questions'])} câu đã tạo."})
+        exam_id = uuid.uuid4().hex
+        messages.append({"role": "assistant", "kind": "exam", "id": exam_id, "exam": partial})
+        st.session_state["active_exam_id"] = exam_id
+    elif stopped:
+        messages.append({"role": "assistant", "content": "Đã dừng tạo đề trước khi có câu hỏi hợp lệ."})
     if not messages:
         with st.chat_message("assistant", avatar="🎓"):
             st.write("Xin chào! Bấm **+** ở ô chat để chọn PDF, DOC/DOCX, PPT/PPTX hoặc CSV. Nhập **Tạo 10 câu hỏi** rồi gửi. Sau khi sinh viên nộp bài, hãy hỏi tôi về kết quả ngay tại đây.")
@@ -435,6 +463,7 @@ def chat_view(model_path, template):
     submission = st.chat_input(
         "Đính kèm tài liệu bằng dấu + hoặc hỏi về bài làm...",
         accept_file=True, file_type=["pdf", "doc", "docx", "ppt", "pptx", "csv"],
+        submit_mode="stop",
     )
     if submission is None:
         return
@@ -451,20 +480,30 @@ def chat_view(model_path, template):
     if files:
         try:
             count = question_count(prompt)
+            st.session_state["generating_exam"] = True
             with st.chat_message("assistant", avatar="🎓"):
                 with st.spinner(f"Đang đọc tài liệu và tạo tối đa {count} câu hỏi..."):
                     progress = st.empty()
+                    def remember_question(partial_exam):
+                        st.session_state["partial_exam"] = partial_exam
+                        progress.write(f"Đã giữ {len(partial_exam['questions'])}/{count} câu")
+
                     exam = create_exam(
                         files[0], model_path, count, template,
                         lambda attempt, accepted: progress.write(
                             f"Đang xử lý nhóm {attempt} · đã giữ {accepted}/{count} câu"),
+                        verify=verify,
+                        on_question=remember_question,
                     )
+                    st.session_state.pop("partial_exam", None)
+                    st.session_state.pop("generating_exam", None)
                     progress.empty()
             exam_id = uuid.uuid4().hex
             messages.append({"role": "assistant", "kind": "exam", "id": exam_id, "exam": exam})
             st.session_state["active_exam_id"] = exam_id
             st.session_state.pop("active_attempt", None)
         except Exception as exc:
+            st.session_state.pop("generating_exam", None)
             messages.append({"role": "assistant", "content": f"Không tạo được đề: {exc}"})
     elif "active_attempt" in st.session_state:
         try:
@@ -497,7 +536,7 @@ def main():
         st.title("🎓 MCQ Studio")
         st.caption("Tài liệu → bộ đề → bài làm → nhận xét")
         if st.button("+ Cuộc trò chuyện mới", use_container_width=True):
-            for key in ("messages", "active_exam_id", "active_attempt"):
+            for key in ("messages", "active_exam_id", "active_attempt", "partial_exam", "generating_exam"):
                 st.session_state.pop(key, None)
             st.rerun()
         model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=1 if LARGE_MODEL.is_file() else 0)
@@ -505,12 +544,15 @@ def main():
         st.caption("modelv1: 4B, nhẹ hơn · modelv2: 8B, ổn định hơn")
         with st.expander("Tùy chỉnh prompt tạo đề"):
             template = st.text_area("Prompt tạo đề", DEFAULT_PROMPT, height=240)
+        verify = st.toggle("Kiểm tra đáp án bằng AI", value=True,
+                           help="Tắt để tạo bản nháp nhanh hơn; cần giảng viên rà soát đáp án trước khi giao bài.")
+        st.caption("Nút Dừng xuất hiện khi đang tạo đề; lượt suy luận hiện tại có thể cần chạy xong trước khi dừng.")
         st.caption("Chạy local · dữ liệu lưu trong output/ · chưa có đăng nhập")
     previous_alias = st.session_state.get("loaded_model_alias")
     if previous_alias and previous_alias != model_alias:
         load_model.clear()
     st.session_state["loaded_model_alias"] = model_alias
-    chat_view(model_path, template)
+    chat_view(model_path, template, verify)
 
 
 if __name__ == "__main__":
