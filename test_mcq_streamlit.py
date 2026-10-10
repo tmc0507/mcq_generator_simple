@@ -391,6 +391,16 @@ def test_example_student_result():
     assert "biên phân tách" in feedback
 
 
+def test_world_model_student_result():
+    folder = Path(__file__).parent / "examples" / "world_model"
+    exam = json.loads((folder / "questions.json").read_text(encoding="utf-8"))
+    payload = (folder / "student_result.json").read_bytes()
+    report = import_result(SimpleNamespace(getvalue=lambda: payload), exam)["report"]
+    assert (report["correct"], report["total"], report["percent"]) == (5, 10, 50.0)
+    assert [item["id"] for item in report["details"] if not item["correct"]] == [2, 4, 6, 8, 10]
+    assert "Planning Horizon và Local Dynamics" in (folder / "feedback.md").read_text(encoding="utf-8")
+
+
 def test_ui_generation_rechecks_revision():
     data = {"blocks": [{"type": "page", "index": 1, "text": "Dữ kiện gốc."}],
             "chunks": [{"text": "Dữ kiện gốc. " * 20, "source_types": ["page"], "source_indices": [1]}]}
@@ -427,6 +437,7 @@ if __name__ == "__main__":
     test_one_chat_from_exam_to_review()
     test_result_file_enters_review_flow()
     test_example_student_result()
+    test_world_model_student_result()
     test_ui_generation_rechecks_revision()
     test_attempts_are_saved()
     print("OK: số câu, prompt, giao diện, chấm bài và chat")

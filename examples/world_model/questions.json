@@ -1,0 +1,246 @@
+{
+  "exam_id": "613d20b962fc43af90b07e2e3cf026af",
+  "document": "World(1)(3).docx",
+  "backend": "llama_cpp",
+  "model": "models/modelv3.gguf",
+  "requested_questions": 10,
+  "accepted_questions": 10,
+  "generation_stats": {
+    "batches": 10,
+    "generated": 10,
+    "accepted": 10
+  },
+  "verification_enabled": false,
+  "questions": [
+    {
+      "question": "World Model không cần phải mô phỏng toàn bộ thế giới mà chỉ cần biểu diễn các yếu tố liên quan đến nhiệm vụ.",
+      "choices": {
+        "A": "Mô phỏng toàn bộ thế giới",
+        "B": "Biểu diễn các yếu tố liên quan đến nhiệm vụ",
+        "C": "Tối ưu hóa chi phí huấn luyện",
+        "D": "Tăng cường độ chính xác của mô hình"
+      },
+      "correct_answer": "B",
+      "concept": "World Model không cần phải mô phỏng toàn bộ thế giới mà chỉ cần biểu diễn các yếu tố liên quan đến nhiệm vụ",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "evidence": "",
+      "source_index": 28,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 1,
+      "source": {
+        "type": "section",
+        "index": 28
+      }
+    },
+    {
+      "question": "Trong SECTION 556, tại sao sai số góc và vận tốc tăng đáng kể sau khoảng 30–50 bước trong rollout?",
+      "choices": {
+        "A": "Vì model chưa học được dynamics toàn cục",
+        "B": "Vì model đã học được local dynamics nhưng không đủ chính xác cho planning horizon dài",
+        "C": "Vì data training bị thiếu các trường hợp biên",
+        "D": "Vì model không có khả năng điều chỉnh tham số"
+      },
+      "correct_answer": "B",
+      "concept": "Planning Horizon và Local Dynamics",
+      "evidence": "SECTION 556",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 556,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 2,
+      "source": {
+        "type": "section",
+        "index": 556
+      }
+    },
+    {
+      "question": "Trong quá trình triển khai thuật toán MPC, phương pháp nào được sử dụng để chọn các candidate có chi phí thấp nhất?",
+      "choices": {
+        "A": "Sử dụng phân phối chuẩn để sinh các hành động",
+        "B": "Chọn K candidate có chi phí cao nhất",
+        "C": "Lọc các candidate dựa trên chi phí tổng",
+        "D": "Tối ưu hóa hàm mất mát của mạng neural"
+      },
+      "correct_answer": "C",
+      "concept": "Lọc các candidate dựa trên chi phí tổng",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "evidence": "",
+      "source_index": 916,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 3,
+      "source": {
+        "type": "section",
+        "index": 916
+      }
+    },
+    {
+      "question": "World Model sau Giai đoạn 2 có thể được dùng để làm gì?",
+      "choices": {
+        "A": "Dự đoán trạng thái tiếp theo",
+        "B": "Thử nghiệm các tương lai có thể xảy ra",
+        "C": "Học latent state và dynamics trong latent space",
+        "D": "Tạo ra hệ thống ra quyết định"
+      },
+      "correct_answer": "B",
+      "concept": "Planner",
+      "evidence": "SECTION 938",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 937,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 4,
+      "source": {
+        "type": "section",
+        "index": 937
+      }
+    },
+    {
+      "question": "Trong không gian ẩn, các tọa độ nào có thể không tương ứng với một đại lượng vật lý cụ thể?",
+      "choices": {
+        "A": "θ và θ̇",
+        "B": "z₁ và z₂",
+        "C": "ż₁ và ż₂",
+        "D": "θ̇ và ż₁"
+      },
+      "correct_answer": "B",
+      "concept": "latent space",
+      "evidence": "SECTION 956",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 955,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 5,
+      "source": {
+        "type": "section",
+        "index": 955
+      }
+    },
+    {
+      "question": "Latent space được sử dụng trong World Model để làm gì?",
+      "choices": {
+        "A": "Nén dữ liệu thành file nhỏ hơn",
+        "B": "Dự đoán trạng thái tiếp theo và các hành động phù hợp",
+        "C": "Tái tạo hình ảnh với độ sắc nét cao",
+        "D": "Giữ lại tất cả chi tiết không liên quan đến nhiệm vụ"
+      },
+      "correct_answer": "B",
+      "concept": "Representation cho tương lai",
+      "evidence": "World Model cần representation có ích cho tương lai. Một latent state tốt phải giữ các thông tin giúp dự đoán trạng thái tiếp theo, reward và action tốt, ngay cả khi nó bỏ bớt những chi tiết không liên quan tới nhiệm vụ.",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 958,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 6,
+      "source": {
+        "type": "section",
+        "index": 958
+      }
+    },
+    {
+      "question": "Trong VAE, Encoder trả về các tham số của phân bố xác suất cho z để làm gì?",
+      "choices": {
+        "A": "Để mã hóa dữ liệu thành một vector cố định",
+        "B": "Để xác định phân bố xác suất của latent variable z",
+        "C": "Để tối ưu hóa hàm mất mát tái tạo",
+        "D": "Để truyền dữ liệu sang Decoder"
+      },
+      "correct_answer": "B",
+      "concept": "Phân bố xác suất trong VAE",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "evidence": "",
+      "source_index": 994,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 7,
+      "source": {
+        "type": "section",
+        "index": 994
+      }
+    },
+    {
+      "question": "Trong World Model, thành phần nào được sử dụng để lưu trữ thông tin về quá khử và tạo ra belief về state hiện tại?",
+      "choices": {
+        "A": "Encoder",
+        "B": "Dynamics",
+        "C": "hₜ",
+        "D": "zₜ"
+      },
+      "correct_answer": "C",
+      "concept": "Deterministic hidden state",
+      "evidence": "Trong đó hₜ là deterministic hidden state mang memory của quá khứ",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 1198,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 8,
+      "source": {
+        "type": "section",
+        "index": 1198
+      }
+    },
+    {
+      "question": "Trong Giai đoạn 3, phương pháp nào được sử dụng để giải thích cơ chế bottleneck trong encoding observation phức tạp thành latent state z?",
+      "choices": {
+        "A": "Autoencoder",
+        "B": "VAE",
+        "C": "Latent Dynamics",
+        "D": "Reward Model"
+      },
+      "correct_answer": "A",
+      "concept": "Autoencoder",
+      "evidence": "SECTION 1214",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 1213,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 9,
+      "source": {
+        "type": "section",
+        "index": 1213
+      }
+    },
+    {
+      "question": "Trong phương pháp Dream to Control, thuật ngữ nào được sử dụng để chỉ quá trình tạo ra các hành vi dựa trên ước lượng tiềm năng?",
+      "choices": {
+        "A": "Latent imagination",
+        "B": "Model-based policy optimization",
+        "C": "Latent dynamics",
+        "D": "Policy gradient"
+      },
+      "correct_answer": "A",
+      "concept": "Dream to Control",
+      "evidence": "SECTION 1547",
+      "source_type": "section",
+      "difficulty": "easy",
+      "explanation": "",
+      "source_index": 1546,
+      "verifier_status": "SKIPPED",
+      "evidence_score": null,
+      "id": 10,
+      "source": {
+        "type": "section",
+        "index": 1546
+      }
+    }
+  ]
+}
