@@ -398,6 +398,10 @@ def test_world_model_student_result():
     folder = Path(__file__).parent / "examples" / "world_model"
     exam = json.loads((folder / "questions.json").read_text(encoding="utf-8"))
     payload = (folder / "student_result.json").read_bytes()
+    template = json.loads((folder.parent / "student_result.template.json").read_text(encoding="utf-8"))
+    expected_ids = {str(question["id"]) for question in exam["questions"]}
+    assert set(template["answers"]) == expected_ids
+    assert set(json.loads(payload)["answers"]) == expected_ids
     attempt = import_result(SimpleNamespace(getvalue=lambda: payload), exam)
     report = attempt["report"]
     assert attempt["student_id"] == "SV005" and attempt["student_name"] == "Sinh viên mẫu"

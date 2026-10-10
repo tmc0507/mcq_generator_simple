@@ -42,10 +42,13 @@ Form kết quả:
       "exam_id": "lay_tu_output_questions_json",
       "student_id": "SV001",
       "student_name": "Nguyễn Văn An",
-      "answers": {"1": "A", "2": "C", "3": ""}
+      "answers": {
+        "1": "", "2": "", "3": "", "4": "", "5": "",
+        "6": "", "7": "", "8": "", "9": "", "10": ""
+      }
     }
 
-student_id và student_name là hai chuỗi bắt buộc, ghi riêng để tìm theo mã hoặc tên và quản lý nhiều lần nộp theo mã số. Khóa trong answers là ID câu hỏi; giá trị là A/B/C/D hoặc chuỗi rỗng. exam_id phải khớp bộ đề đang mở. Xem form trong examples/student_result.template.json và cặp đề/bài làm mẫu trong examples/world_model/.
+student_id và student_name là hai chuỗi bắt buộc, ghi riêng để tìm theo mã hoặc tên và quản lý nhiều lần nộp theo mã số. Khóa trong answers là ID câu hỏi; giá trị là A/B/C/D hoặc chuỗi rỗng. Form trên minh họa bộ đề 10 câu; khi dùng bộ đề khác, lấy đúng các ID từ output/questions.json. exam_id phải khớp bộ đề đang mở. Xem form trong examples/student_result.template.json và cặp đề/bài làm mẫu trong examples/world_model/.
 
 Chế độ tạo nhanh giữ câu hỏi model sinh ra, chỉ loại câu trùng nguyên văn. Giảng viên cần rà soát đáp án trước khi giao đề. Có thể bật “Kiểm tra đáp án bằng AI” nếu cần kiểm tra sâu hơn.
 
