@@ -255,16 +255,19 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=F
     results = []
     stats = {}
     exam = {
+        "exam_id": uuid.uuid4().hex,
         "document": document_name, "backend": "llama_cpp", "model": str(model_path),
         "requested_questions": count, "accepted_questions": 0,
         "generation_stats": stats, "verification_enabled": verify, "questions": questions,
     }
+    write_json(EXAM, exam)
     for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=verify, stats=stats):
         question["id"] = len(questions) + 1
         question["source"] = {"type": question["source_type"], "index": question["source_index"]}
         questions.append(question)
         results.append(format_question(document_name, question, prompt))
         exam["accepted_questions"] = len(questions)
+        write_json(EXAM, exam)
         if on_question:
             on_question(exam)
     if not questions:
@@ -326,6 +329,35 @@ def score_attempt(questions, answers):
     }
 
 
+def import_result(uploaded, exam):
+    try:
+        data = json.loads(uploaded.getvalue().decode("utf-8-sig"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ValueError("File kết quả phải là JSON UTF-8 hợp lệ.") from exc
+    if not isinstance(data, dict):
+        raise ValueError("File kết quả phải là một JSON object.")
+    if data.get("exam_id") != exam.get("exam_id") or not exam.get("exam_id"):
+        raise ValueError("exam_id không khớp với bộ đề đang mở.")
+    if not exam.get("questions"):
+        raise ValueError("Bộ đề chưa có câu hỏi để chấm.")
+    student = data.get("student")
+    answers = data.get("answers")
+    if not isinstance(student, str) or not student.strip():
+        raise ValueError("Kết quả thiếu tên hoặc mã sinh viên.")
+    valid_ids = {str(question["id"]) for question in exam["questions"]}
+    if not isinstance(answers, dict) or any(
+        key not in valid_ids or value not in ("", "A", "B", "C", "D")
+        for key, value in answers.items()
+    ):
+        raise ValueError("answers phải chứa ID câu hỏi và đáp án A/B/C/D hoặc chuỗi rỗng.")
+    return {
+        "id": uuid.uuid4().hex, "exam_id": exam["exam_id"],
+        "student": student.strip(),
+        "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "document": exam["document"], "report": score_attempt(exam["questions"], answers),
+    }
+
+
 def read_attempts():
     if not ATTEMPTS.is_file():
         return []
@@ -375,7 +407,7 @@ def teacher_reply(llm, question, report):
 def render_exam_message(message):
     exam = message["exam"]
     with st.chat_message("assistant", avatar="🎓"):
-        st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải đề TXT hoặc làm bài ngay dưới đây.")
+        st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải JSON để đưa sang trang web làm bài.")
         if exam.get("verification_enabled") is False:
             st.info("Bản nháp nhanh: giữ nguyên dẫn chứng và cả câu có thể trùng; chưa kiểm tra đáp án. Giảng viên nên rà soát trước khi giao bài.")
         if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
@@ -392,54 +424,19 @@ def render_exam_message(message):
                 f"trùng lặp: {stats.get('duplicate', 0)}."
             )
         st.download_button(
+            "⬇ Tải dữ liệu đề JSON", json.dumps(exam, ensure_ascii=False, indent=2),
+            file_name=f"{Path(exam['document']).stem}_questions.json", mime="application/json",
+            key="download_json_" + message["id"],
+        )
+        st.download_button(
             "⬇ Tải bộ đề TXT", format_exam_txt(exam),
             file_name=f"{Path(exam['document']).stem}_questions.txt", mime="text/plain",
-            key="download_" + message["id"],
+            key="download_txt_" + message["id"],
         )
-        if message.get("attempt"):
-            attempt = message["attempt"]
-            report = attempt["report"]
-            st.success(f"{attempt['student']}: {report['correct']}/{report['total']} ({report['percent']}%).")
-            return
-        if st.session_state.get("active_exam_id") != message["id"]:
-            st.caption("Đây là bộ đề cũ trong cuộc trò chuyện; hãy làm bộ đề mới nhất ở dưới.")
-            return
-        with st.form("quiz_" + message["id"]):
-            student = st.text_input("Tên hoặc mã sinh viên")
-            answers = {}
-            for position, question in enumerate(exam["questions"], 1):
-                st.markdown(f"**Câu {position}. {question['question']}**")
-                choices = question["choices"]
-                answers[str(question.get("id", position))] = st.radio(
-                    "Chọn đáp án", list("ABCD"), index=None,
-                    format_func=lambda letter, options=choices: f"{letter}. {options[letter]}",
-                    key=f"quiz_{message['id']}_{position}", label_visibility="collapsed",
-                ) or ""
-            submitted = st.form_submit_button("Nộp bài", type="primary")
-        if submitted:
-            if not student.strip():
-                st.error("Nhập tên hoặc mã sinh viên trước khi nộp bài.")
-                return
-            report = score_attempt(exam["questions"], answers)
-            attempt = {
-                "id": uuid.uuid4().hex, "student": student.strip(),
-                "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "document": exam["document"], "report": report,
-            }
-            save_attempt(attempt)
-            message["attempt"] = attempt
-            st.session_state["active_attempt"] = attempt
-            st.session_state["messages"].extend([
-                {"role": "user", "content": f"{student.strip()} đã nộp bài."},
-                {"role": "assistant", "content":
-                 f"Đã chấm: **{report['correct']}/{report['total']}** ({report['percent']}%). "
-                 "Bạn có thể hỏi tôi nhận xét về bài làm này ngay trong ô chat."},
-            ])
-            st.rerun()
 
 
 def chat_view(model_path, template, verify=False):
-    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu bằng dấu +, làm bài và hỏi tiếp ngay tại đây.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu để tạo đề; nhận kết quả JSON từ trang làm bài để nhận xét.</p></div>', unsafe_allow_html=True)
     messages = st.session_state.setdefault("messages", [])
     stopped = st.session_state.pop("generating_exam", False)
     partial = st.session_state.pop("partial_exam", None)
@@ -453,12 +450,11 @@ def chat_view(model_path, template, verify=False):
                          f"Đã dừng tạo đề. Giữ lại {len(partial['questions'])} câu đã tạo."})
         exam_id = uuid.uuid4().hex
         messages.append({"role": "assistant", "kind": "exam", "id": exam_id, "exam": partial})
-        st.session_state["active_exam_id"] = exam_id
     elif stopped:
         messages.append({"role": "assistant", "content": "Đã dừng tạo đề trước khi có câu hỏi hợp lệ."})
     if not messages:
         with st.chat_message("assistant", avatar="🎓"):
-            st.write("Xin chào! Bấm **+** ở ô chat để chọn PDF, DOC/DOCX, PPT/PPTX hoặc CSV. Nhập **Tạo 10 câu hỏi** rồi gửi. Sau khi sinh viên nộp bài, hãy hỏi tôi về kết quả ngay tại đây.")
+            st.write("Xin chào! Bấm **+** để chọn tài liệu và tạo đề JSON. Khi có kết quả từ trang làm bài, đính kèm file JSON rồi hỏi tôi nhận xét.")
     for message in messages:
         if message.get("kind") == "exam":
             render_exam_message(message)
@@ -466,8 +462,8 @@ def chat_view(model_path, template, verify=False):
             with st.chat_message(message["role"], avatar="🎓" if message["role"] == "assistant" else "👤"):
                 st.write(message["content"])
     submission = st.chat_input(
-        "Đính kèm tài liệu bằng dấu + hoặc hỏi về bài làm...",
-        accept_file=True, file_type=["pdf", "doc", "docx", "ppt", "pptx", "csv"],
+        "Đính kèm tài liệu hoặc kết quả JSON bằng dấu +...",
+        accept_file=True, file_type=["pdf", "doc", "docx", "ppt", "pptx", "csv", "json"],
         submit_mode="stop",
     )
     if submission is None:
@@ -476,13 +472,30 @@ def chat_view(model_path, template, verify=False):
     files = submission.files
     if not prompt and not files:
         return
-    content = prompt or "Tạo bộ đề từ tài liệu"
+    is_result_file = bool(files) and Path(files[0].name).suffix.lower() == ".json"
+    content = prompt or ("Nhận kết quả bài làm" if is_result_file else "Tạo bộ đề từ tài liệu")
     if files:
         content += f"\n\n📎 {files[0].name}"
     messages.append({"role": "user", "content": content})
     with st.chat_message("user", avatar="👤"):
         st.write(content)
-    if files:
+    if is_result_file:
+        try:
+            exam = next((item["exam"] for item in reversed(messages)
+                         if item.get("kind") == "exam"), None) or read_exam()
+            if exam is None:
+                raise ValueError("Chưa có bộ đề để đối chiếu kết quả.")
+            attempt = import_result(files[0], exam)
+            save_attempt(attempt)
+            st.session_state["active_attempt"] = attempt
+            report = attempt["report"]
+            messages.append({"role": "assistant", "content":
+                             f"Đã nhận kết quả của **{attempt['student']}**: "
+                             f"{report['correct']}/{report['total']} ({report['percent']}%). "
+                             "Hãy hỏi tôi nhận xét bài làm này."})
+        except Exception as exc:
+            messages.append({"role": "assistant", "content": f"Không nhận được kết quả: {exc}"})
+    elif files:
         try:
             count = question_count(prompt)
             st.session_state["generating_exam"] = True
@@ -505,7 +518,6 @@ def chat_view(model_path, template, verify=False):
                     progress.empty()
             exam_id = uuid.uuid4().hex
             messages.append({"role": "assistant", "kind": "exam", "id": exam_id, "exam": exam})
-            st.session_state["active_exam_id"] = exam_id
             st.session_state.pop("active_attempt", None)
         except Exception as exc:
             st.session_state.pop("generating_exam", None)
@@ -519,8 +531,8 @@ def chat_view(model_path, template, verify=False):
         except Exception as exc:
             messages.append({"role": "assistant", "content": f"Chưa thể nhận xét: {exc}"})
     else:
-        answer = ("Hãy hoàn thành và nộp bộ đề trong cuộc trò chuyện này trước khi yêu cầu nhận xét."
-                  if "active_exam_id" in st.session_state else
+        answer = ("Hãy đính kèm file kết quả JSON từ trang làm bài trước khi yêu cầu nhận xét."
+                  if any(item.get("kind") == "exam" for item in messages) else
                   "Hãy bấm dấu + để đính kèm tài liệu, rồi nhập yêu cầu như ‘Tạo 10 câu hỏi’." )
         messages.append({"role": "assistant", "content": answer})
     st.rerun()
@@ -539,9 +551,9 @@ def main():
     </style>""", unsafe_allow_html=True)
     with st.sidebar:
         st.title("🎓 MCQ Studio")
-        st.caption("Tài liệu → bộ đề → bài làm → nhận xét")
+        st.caption("Tài liệu → đề JSON → kết quả từ web khác → nhận xét")
         if st.button("+ Cuộc trò chuyện mới", use_container_width=True):
-            for key in ("messages", "active_exam_id", "active_attempt", "partial_exam", "generating_exam"):
+            for key in ("messages", "active_attempt", "partial_exam", "generating_exam"):
                 st.session_state.pop(key, None)
             st.rerun()
         model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=list(MODEL_OPTIONS.values()).index(MODEL))

@@ -7,7 +7,7 @@ from streamlit.testing.v1 import AppTest
 
 import mcq_streamlit
 from mcq_streamlit import (
-    create_exam, format_exam_txt, generate_questions, question_count,
+    create_exam, format_exam_txt, generate_questions, import_result, question_count,
     render_prompt, score_attempt, teacher_reply,
 )
 
@@ -44,7 +44,7 @@ def test_app():
     assert not app.exception, app.exception
     assert app.chat_input[0].proto.accept_file
     assert str(app.chat_input[0].proto.submit_mode) == "2"
-    assert set(app.chat_input[0].proto.file_type) == {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv"}
+    assert set(app.chat_input[0].proto.file_type) == {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv", ".json"}
     assert app.selectbox[0].value in {"modelv1", "modelv2", "modelv3"}
     assert tuple(mcq_streamlit.MODEL_OPTIONS) == ("modelv1", "modelv2", "modelv3")
     assert [path.name for path in mcq_streamlit.MODEL_OPTIONS.values()] == [
@@ -155,13 +155,15 @@ def test_exam_file_and_count():
             uploaded = SimpleNamespace(name="sample.csv", getvalue=lambda: b"value\nexample\n")
             exam = create_exam(uploaded, model_path, 1, "{source}")
             assert len(exam["questions"]) == 1
+            assert exam["exam_id"]
             assert mcq_streamlit.EXAM.is_file() and mcq_streamlit.EXAM_TXT.is_file()
             assert mcq_streamlit.EXAM_TXT.read_text(encoding="utf-8") == format_exam_txt(exam)
             assert "Đáp án:" not in format_exam_txt(exam)
             snapshots = []
-            fast_exam = create_exam(uploaded, model_path, 1, "{source}", verify=False,
-                                    on_question=lambda partial: snapshots.append(partial["accepted_questions"]))
-            assert snapshots == [1]
+            fast_exam = create_exam(uploaded, model_path, 3, "{source}", verify=False,
+                                    on_question=lambda partial: snapshots.append(
+                                        json.loads(mcq_streamlit.EXAM.read_text(encoding="utf-8"))["accepted_questions"]))
+            assert snapshots == [1, 2, 3]
             assert fast_exam["verification_enabled"] is False
             assert fast_exam["questions"][0]["verifier_status"] == "SKIPPED"
             assert fast_exam["questions"][0]["evidence_score"] is None
@@ -234,40 +236,78 @@ def test_scoring_and_teacher_chat():
 
 
 def test_one_chat_from_exam_to_review():
-    exam = {"document": "sample.csv", "questions": [
+    exam = {"exam_id": "demo-exam", "document": "sample.csv", "questions": [
         {"id": 1, "question": "Alpha là gì?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
          "correct_answer": "A", "concept": "Đại số", "explanation": "Ví dụ A"},
         {"id": 2, "question": "Beta là gì?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
          "correct_answer": "B", "concept": "Hình học", "explanation": "Ví dụ B"},
     ]}
-    with tempfile.TemporaryDirectory() as directory:
-        attempts = Path(directory) / "attempts.json"
-        script = f'''import mcq_streamlit as app
-from pathlib import Path
-app.ATTEMPTS = Path({str(attempts)!r})
+    uploaded = SimpleNamespace(getvalue=lambda: json.dumps({
+        "exam_id": "demo-exam", "student": "Sinh viên A", "answers": {"1": "A", "2": "A"},
+    }).encode("utf-8"))
+    attempt = import_result(uploaded, exam)
+    assert attempt["report"]["correct"] == 1
+    for invalid in (
+        {"exam_id": "wrong", "student": "A", "answers": {"1": "A"}},
+        {"exam_id": "demo-exam", "student": "A", "answers": {"9": "A"}},
+        {"exam_id": "demo-exam", "student": "A", "answers": {"1": "E"}},
+    ):
+        try:
+            import_result(SimpleNamespace(getvalue=lambda value=invalid: json.dumps(value).encode()), exam)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Accepted invalid result: {invalid}")
+    script = '''import mcq_streamlit as app
 class ReviewModel:
     def generate_text(self, messages, **kwargs):
         return "**Điểm mạnh:** Trả lời đúng câu 1.\\n**Cần cải thiện:** Trả lời sai câu 2.\\n**Gợi ý ôn tập:** Ôn Hình học."
 app.load_model = lambda path=None: ReviewModel()
 app.main()
 '''
+    app = AppTest.from_string(script).run(timeout=30)
+    app.session_state["messages"] = [{"role": "assistant", "kind": "exam", "id": "demo", "exam": exam}]
+    app.session_state["active_attempt"] = attempt
+    app.run(timeout=30)
+    assert not app.exception, app.exception
+    assert not app.radio
+    assert "Tải JSON" in app.chat_message[-1].markdown[0].value
+    app.chat_input[0].set_value("Nhận xét bài làm").run(timeout=30)
+    assert not app.exception, app.exception
+    assert "Ôn Hình học" in app.chat_message[-1].markdown[0].value
+
+
+def test_result_file_enters_review_flow():
+    exam = {"exam_id": "demo-exam", "document": "sample.csv", "questions": [
+        {"id": 1, "question": "Alpha?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+         "correct_answer": "A", "concept": "Đại số"},
+    ]}
+    payload = json.dumps({"exam_id": "demo-exam", "student": "SV001", "answers": {"1": "A"}}).encode()
+    with tempfile.TemporaryDirectory() as directory:
+        script = f'''import mcq_streamlit as app
+from pathlib import Path
+from types import SimpleNamespace
+app.ATTEMPTS = Path({str(Path(directory) / "attempts.json")!r})
+original = app.st.chat_input
+def injected(*args, **kwargs):
+    if app.st.session_state.pop("inject_result", False):
+        return SimpleNamespace(text="", files=[SimpleNamespace(name="result.json", getvalue=lambda: {payload!r})])
+    return original(*args, **kwargs)
+app.st.chat_input = injected
+try:
+    app.main()
+finally:
+    app.st.chat_input = original
+'''
         app = AppTest.from_string(script).run(timeout=30)
         app.session_state["messages"] = [{"role": "assistant", "kind": "exam", "id": "demo", "exam": exam}]
-        app.session_state["active_exam_id"] = "demo"
+        app.session_state["inject_result"] = True
         app.run(timeout=30)
         assert not app.exception, app.exception
-        assert len(app.radio) == 2
-        assert any(button.label == "Nộp bài" for button in app.button)
-        app.text_input[0].set_value("Sinh viên A")
-        app.radio[0].set_value("A")
-        app.radio[1].set_value("A")
-        next(button for button in app.button if button.label == "Nộp bài").click().run(timeout=30)
-        assert not app.exception, app.exception
-        assert json.loads(attempts.read_text(encoding="utf-8"))[0]["report"]["correct"] == 1
-        app.chat_input[0].set_value("Nhận xét bài làm").run(timeout=30)
-        assert not app.exception, app.exception
-        assert len(app.chat_message) == 5
-        assert "Ôn Hình học" in app.chat_message[-1].markdown[0].value
+        assert app.session_state["active_attempt"]["report"]["correct"] == 1
+        saved = json.loads(Path(directory, "attempts.json").read_text(encoding="utf-8"))
+        assert saved[0]["exam_id"] == "demo-exam"
+        assert any("Đã nhận kết quả" in item.value for item in app.markdown)
 
 
 def test_ui_generation_rechecks_revision():
@@ -303,6 +343,7 @@ if __name__ == "__main__":
     test_stopped_exam_is_kept_in_chat()
     test_scoring_and_teacher_chat()
     test_one_chat_from_exam_to_review()
+    test_result_file_enters_review_flow()
     test_ui_generation_rechecks_revision()
     test_attempts_are_saved()
     print("OK: số câu, prompt, giao diện, chấm bài và chat")

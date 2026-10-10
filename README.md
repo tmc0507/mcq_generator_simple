@@ -150,11 +150,20 @@ streamlit run mcq_streamlit.py
 
 Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
-1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Mặc định giao diện tạo bản nháp nhanh: kiểm tra cấu trúc tối thiểu, giữ nguyên dẫn chứng và cả câu có thể trùng; không gọi verifier AI.
-   Bản nháp nhanh tạo từng câu để tránh một lượt suy luận quá dài; số câu được phân bổ theo độ dài chunk. Nếu model tạo ít câu hơn yêu cầu, đề vẫn được lưu với số câu thực tế. Có thể bật **Kiểm tra đáp án bằng AI** nếu muốn rà soát sâu hơn, nhưng sẽ chậm hơn.
-2. Khi đề hiện trong chat, bấm **Tải bộ đề TXT** để lưu bản chỉ gồm câu hỏi và lựa chọn. Đề JSON lưu ở `output/questions.json`, bản TXT ở `output/questions.txt`.
-3. Sinh viên nhập tên/mã, chọn đáp án và **Nộp bài** ngay trong thẻ đề. Kết quả lưu ở `output/attempts.json`.
-4. Nhập câu hỏi tiếp trong cùng ô chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Chatbot dùng kết quả bài vừa nộp; nhận xét từ một bài kiểm tra không phải đánh giá năng lực toàn diện.
+1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Mặc định giao diện tạo bản nháp nhanh: kiểm tra cấu trúc tối thiểu, giữ nguyên dẫn chứng và cả câu có thể trùng; không gọi verifier AI. Mỗi câu dùng được được ghi ngay vào `output/questions.json`, nên có thể giữ phần đã tạo nếu dừng.
+2. Bấm **Tải dữ liệu đề JSON** để chuyển bộ đề sang trang web làm bài. File chứa `exam_id`, câu hỏi, lựa chọn và đáp án; bản TXT chỉ chứa câu hỏi và lựa chọn. Nếu model tạo ít hơn yêu cầu, file vẫn giữ số câu thực tế.
+3. Trang web khác thu đáp án của sinh viên và gửi lại một file JSON theo mẫu dưới đây. Đính kèm file đó bằng dấu **+**; app chấm lại theo đề có cùng `exam_id` và lưu kết quả vào `output/attempts.json`.
+4. Hỏi tiếp trong chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Nhận xét dựa trên kết quả vừa nhập, không đánh giá năng lực toàn diện từ một bài kiểm tra.
+
+```json
+{
+  "exam_id": "gia-tri-exam_id-trong-questions.json",
+  "student": "SV001",
+  "answers": {"1": "A", "2": "C", "3": ""}
+}
+```
+
+`answers` dùng ID câu hỏi làm khóa; giá trị là `A`, `B`, `C`, `D` hoặc chuỗi rỗng nếu bỏ trống. App từ chối file có `exam_id` không khớp hoặc đáp án không hợp lệ. Giao diện này không có bước sinh viên làm bài.
 
 Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B, mặc định), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 
@@ -238,7 +247,7 @@ python3 scripts/generate_mcq.py \
 
 ## Output và kiểm chứng
 
-Cả hai backend ghi `output/questions.json` với `document`, `backend`, `model`, `requested_questions`, `generated_questions`, `accepted_questions`, `rejected_questions`, và `questions`. Mỗi câu có `id`, `question`, bốn `choices`, `correct_answer`, `concept`, `difficulty`, `explanation`, `evidence`, `source` (`type` và `index`), `evidence_score`, `verifier_status`. Hai field cũ `source_type` và `source_index` vẫn được giữ để tương thích local.
+Cả hai backend ghi `output/questions.json` với `document`, `backend`, `model`, số câu yêu cầu/được giữ, và `questions`. Giao diện Streamlit thêm `exam_id` để ghép đúng file kết quả trả về. Mỗi câu có `id`, `question`, bốn `choices`, `correct_answer`, `concept`, `difficulty`, `explanation`, `evidence`, `source` (`type` và `index`), `evidence_score`, `verifier_status`. Hai field cũ `source_type` và `source_index` vẫn được giữ để tương thích local.
 
 Evidence checker chỉ kiểm tra đoạn trích có trong tài liệu; cùng model đang load sẽ kiểm tra nghĩa và đáp án. Sau `REVISE`, code kiểm tra lại cấu trúc và evidence. Qwen3 dùng `/no_think` trong prompt local và `enable_thinking=False` trong chat template Transformers; parser loại `<think>` nếu model vẫn xuất ra.
 
