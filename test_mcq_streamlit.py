@@ -110,8 +110,11 @@ def test_generation_has_bounded_batches_and_validates_each_question():
     class KeepWholeBatch(FakeModel):
         def generate_text(self, messages, **kwargs):
             self.calls += 1
+            assert kwargs["max_new_tokens"] == 660
             assert kwargs["schema"]["properties"]["questions"]["items"]["required"] == [
-                "question", "choices", "correct_answer"]
+                "question", "choices", "correct_answer", "concept"]
+            assert set(kwargs["schema"]["properties"]["questions"]["items"]["properties"]) == {
+                "question", "choices", "correct_answer", "concept", "evidence"}
             return json.dumps({"questions": [
                 {"question": "Câu trùng?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
                  "correct_answer": "A", "evidence": "Dẫn chứng không có trong tài liệu."},
@@ -128,11 +131,20 @@ def test_generation_has_bounded_batches_and_validates_each_question():
     whole_batch = [question for question, _ in generate_questions(
         whole_model, data, 3, mcq_streamlit.DEFAULT_PROMPT, verify=False, stats=whole_stats)]
     assert whole_model.calls == 1
-    assert len(whole_batch) == whole_stats["generated"] == whole_stats["accepted"] == 4
+    assert whole_stats["generated"] == 4
+    assert len(whole_batch) == whole_stats["accepted"] == 3
+    assert whole_stats["duplicate"] == 1
     assert whole_batch[0]["evidence"] == "Dẫn chứng không có trong tài liệu."
-    assert whole_batch[0]["question"] == whole_batch[1]["question"]
-    assert whole_batch[2]["correct_answer"] == ""
-    assert whole_batch[2]["choices"]["D"] == ""
+    assert whole_batch[1]["correct_answer"] == ""
+    assert whole_batch[1]["choices"]["D"] == ""
+
+    repeated = {"blocks": [{"type": "page", "index": i,
+                             "text": "Course header\n" + f"Chi tiết riêng của trang {i}. " * 10}
+                            for i in (1, 2, 3)],
+                "chunks": [{"text": "Course header\n" + "Chi tiết riêng của từng trang. " * 15,
+                            "source_types": ["page"], "source_indices": [1]}]}
+    cleaned = list(generate_questions(FakeModel(), repeated, 1, "{source}", verify=False))
+    assert "Course header" not in cleaned[0][1]
 
     class UncheckedEvidence(FakeModel):
         def generate_text(self, messages, **kwargs):
@@ -189,7 +201,8 @@ def test_exam_file_and_count():
             class FastBatchModel(VerifierModel):
                 def generate_text(self, messages, **kwargs):
                     result = json.loads(super().generate_text(messages, **kwargs))
-                    return json.dumps({"questions": result["questions"] * 3})
+                    return json.dumps({"questions": [dict(result["questions"][0], question=f"Câu {i}?")
+                                                     for i in range(3)]})
 
             mcq_streamlit.load_model = lambda path: FastBatchModel()
             fast_exam = create_exam(uploaded, model_path, 3, "{source}", verify=False,

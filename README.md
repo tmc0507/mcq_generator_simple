@@ -89,13 +89,13 @@ Nếu máy thiếu dependency build hoặc CUDA compiler không tương thích, 
 
 ### Model nhẹ cho giao diện
 
-Giao diện mặc định dùng `modelv1`: Qwen3-1.7B Q4_K_M GGUF (khoảng 1.2 GB). Ba file GGUF nằm trong thư mục `models/` theo tên:
+Giao diện ưu tiên `modelv3` (Qwen3-4B) khi có file; nếu thiếu thì dùng `modelv1` (Qwen3-1.7B). Ba file GGUF nằm trong thư mục `models/` theo tên:
 
 | Tên file | Model gốc | Vai trò |
 | --- | --- | --- |
-| `modelv1.gguf` | Qwen3-1.7B Q4_K_M | Nhanh nhất, mặc định |
-| `modelv2.gguf` | Qwen3-8B Q4_K_M | Chất lượng cao hơn, chậm hơn |
-| `modelv3.gguf` | Qwen3-4B Q4_K_M | Mức trung gian |
+| `modelv1.gguf` | Qwen3-1.7B Q4_K_M | Nhanh nhất nhưng dễ lặp câu |
+| `modelv2.gguf` | Qwen3-8B Q4_K_M | Chất lượng cao hơn, rất chậm trên CPU |
+| `modelv3.gguf` | Qwen3-4B Q4_K_M | Mặc định khi có file, cân bằng tốc độ và chất lượng |
 
 Sau khi clone code từ GitHub, tải các file GGUF từ [thư mục Google Drive của project](https://drive.google.com/drive/folders/1aeogV0naaJXpfwNbGDlzKCgCKVbc8d8P?usp=drive_link), rồi đặt vào `models/` theo đúng tên trong bảng trên. Tạo thư mục nếu chưa có:
 
@@ -103,7 +103,7 @@ Sau khi clone code từ GitHub, tải các file GGUF từ [thư mục Google Dri
 mkdir -p models
 ```
 
-GGUF không nằm trong GitHub repository. Chỉ cần `modelv1.gguf` để chạy giao diện với model mặc định; có thể bổ sung `modelv2.gguf` và `modelv3.gguf` sau.
+GGUF không nằm trong GitHub repository. Chỉ cần `modelv1.gguf` là chạy được; khi thêm `modelv3.gguf`, giao diện sẽ chọn modelv3 mặc định. Có thể bổ sung `modelv2.gguf` nếu máy đủ mạnh.
 
 Cũng có thể tải trực tiếp từ Hugging Face. Các model gốc được phát hành theo giấy phép [Apache 2.0](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/LICENSE): [1.7B](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF), [4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [8B](https://huggingface.co/Qwen/Qwen3-8B-GGUF).
 
@@ -150,7 +150,7 @@ streamlit run mcq_streamlit.py
 
 Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
-1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Chế độ mặc định tạo từng nhóm tối đa 3 câu và giữ **mọi câu model trả về trong nhóm**: không kiểm tra dẫn chứng, không loại câu trùng, không gọi verifier AI. Từng câu được ghi ngay vào `output/questions.json`, nên có thể giữ phần đã tạo nếu dừng.
+1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Chế độ mặc định tạo từng nhóm tối đa 3 câu: giữ câu model trả về, chỉ bỏ câu hỏi trùng nguyên văn; không kiểm tra dẫn chứng và không gọi verifier AI. Từng câu được ghi ngay vào `output/questions.json`, nên có thể giữ phần đã tạo nếu dừng.
 2. Bấm **Tải dữ liệu đề JSON** để chuyển bộ đề sang trang web làm bài. File chứa `exam_id`, câu hỏi, lựa chọn và đáp án; bản TXT chỉ chứa câu hỏi và lựa chọn. Số câu thực tế có thể ít hơn hoặc nhiều hơn số yêu cầu nếu model trả thiếu hoặc sinh dư trong một nhóm.
 3. Trang web khác thu đáp án của sinh viên và gửi lại một file JSON theo mẫu dưới đây. Đính kèm file đó bằng dấu **+**; app chấm lại theo đề có cùng `exam_id` và lưu kết quả vào `output/attempts.json`.
 4. Hỏi tiếp trong chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Nhận xét dựa trên kết quả vừa nhập, không đánh giá năng lực toàn diện từ một bài kiểm tra.
@@ -167,11 +167,11 @@ Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
 Xem [form trống](examples/student_result.template.json), [bài làm ví dụ](examples/student_result.example.json) và [nhận xét modelv1](examples/feedback.example.md). Bài làm ví dụ khớp với [đề ví dụ](examples/demo_exam.json): sinh viên đúng câu 1 và 4, sai câu 2, bỏ trống câu 3, nên được 2/4. Web làm bài cần lấy `exam_id` và các `id` câu hỏi từ file `questions.json` vừa tải, rồi xuất JSON UTF-8 theo đúng form này; không cần gửi đáp án đúng hay điểm số. Nếu sinh viên bỏ trống một câu, dùng chuỗi rỗng hoặc bỏ khóa câu đó trong `answers`. Trong giao diện thật, chỉ nhận xét được kết quả có `exam_id` trùng với bộ đề đang mở. Số liệu và danh sách câu chưa đúng được app chấm trực tiếp; model chỉ gợi ý ôn tập.
 
-Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B, mặc định), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
+Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 
-Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B` và giữ cả câu thiếu trường. Nếu câu thiếu đáp án hoặc lựa chọn, cần sửa trước khi chấm kết quả; app sẽ báo lỗi thay vì chấm sai. Giảng viên cần rà soát bản nháp trước khi giao bài. Bật **Kiểm tra đáp án bằng AI** nếu muốn dùng lại quy trình kiểm tra chặt hơn. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
+Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B` và giữ cả câu thiếu trường. Nếu câu thiếu đáp án hoặc lựa chọn, cần sửa trước khi chấm kết quả; app sẽ báo lỗi thay vì chấm sai. Chế độ nhanh chỉ loại câu hỏi giống hệt sau chuẩn hóa chữ; những câu diễn đạt khác nhưng cùng ý vẫn có thể trùng. Giảng viên cần rà soát bản nháp trước khi giao bài. Bật **Kiểm tra đáp án bằng AI** nếu muốn dùng lại quy trình kiểm tra chặt hơn. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
 
-Model được cache để tạo đề và chat dùng cùng một bản trong RAM. Chạy CPU với 8B có thể chậm; dùng modelv1 hoặc GPU nếu có.
+Model được cache để tạo đề và chat dùng cùng một bản trong RAM. Chế độ nhanh chỉ yêu cầu model sinh câu hỏi, lựa chọn, đáp án và chủ đề; dẫn chứng là tùy chọn. App tự dùng tối đa 20 lớp GPU khi `llama-cpp-python` báo hỗ trợ CUDA, còn lại chạy CPU. Nếu `nvidia-smi` báo `Driver/library version mismatch`, cần khởi động lại máy sau khi cập nhật driver; trước đó modelv2/modelv3 vẫn chạy trên CPU và có thể chậm.
 
 ### Chạy toàn pipeline
 

@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,7 +19,7 @@ SOURCE = Path(__file__).resolve().parent
 SMALL_MODEL = SOURCE / "models/modelv1.gguf"
 LARGE_MODEL = SOURCE / "models/modelv2.gguf"
 MEDIUM_MODEL = SOURCE / "models/modelv3.gguf"
-MODEL = next((path for path in (SMALL_MODEL, MEDIUM_MODEL, LARGE_MODEL) if path.is_file()), SMALL_MODEL)
+MODEL = next((path for path in (MEDIUM_MODEL, SMALL_MODEL, LARGE_MODEL) if path.is_file()), SMALL_MODEL)
 INPUT = SOURCE / "input"
 OUTPUT = SOURCE / "output/mcq_questions.txt"
 EXAM = SOURCE / "output/questions.json"
@@ -38,6 +39,7 @@ from generate_mcq import (  # noqa: E402
     VERIFY_SCHEMA,
     allocate_questions,
     normalize_mcq_format,
+    normalize_text,
 )
 
 
@@ -46,10 +48,10 @@ Bạn là người ra đề trắc nghiệm. Chỉ dùng thông tin trong SOURCE
 Hãy viết tối đa {count} câu mới, bắt đầu từ câu thứ {index} trong tổng {total} câu được yêu cầu.
 - Viết bằng tiếng Việt, giữ nguyên thuật ngữ chuyên ngành.
 - Có đúng 4 lựa chọn A/B/C/D và chỉ một đáp án đúng.
-- Ưu tiên đáp án dựa trên SOURCE. Nếu có dẫn chứng thì ghi đoạn liên quan; không cần chép nguyên văn.
-- Có thể thêm concept, difficulty, explanation và nguồn nếu có.
+- Mỗi câu hỏi một ý khác nhau; không lặp câu trong cùng nhóm hoặc các câu đã tạo.
+- Hỏi một chi tiết cụ thể trong SOURCE hiện tại (điều kiện, công thức, thuật ngữ); không hỏi lại tên hoặc định nghĩa chung của chủ đề.
+- Đáp án phải dựa trên SOURCE. Ghi concept ngắn; evidence có thể bỏ trống.
 - Nếu SOURCE không đủ thông tin, tạo ít câu hơn hoặc trả danh sách questions rỗng.
-Các câu đã tạo, không lặp lại: {previous_questions}
 
 SOURCE:
 {source}"""
@@ -58,10 +60,15 @@ SYSTEM_PROMPT = "Chỉ dùng SOURCE để tạo MCQ; chỉ trả JSON theo schem
 
 @st.cache_resource
 def load_model(model_path=None):
+    try:
+        from llama_cpp import llama_supports_gpu_offload
+        gpu_layers = 20 if llama_supports_gpu_offload() else 0
+    except ImportError:
+        gpu_layers = 0
     return LlamaCppBackend(
         model=str(model_path or MODEL),
         n_ctx=3072,
-        n_gpu_layers=0,
+        n_gpu_layers=gpu_layers,
         threads=min(4, os.cpu_count() or 4),
     )
 
@@ -99,6 +106,12 @@ def render_prompt(template, chunk, index, total, previous, count=1):
 def generate_questions(llm, data, count, template, on_attempt=None, verify=False, stats=None):
     source_map = {(b["type"], b["index"]): b["text"] for b in data["blocks"]}
     chunks = data["chunks"]
+    if not verify:
+        line_counts = Counter(line.strip() for block in data["blocks"]
+                              for line in set(block["text"].splitlines()) if line.strip())
+        repeated_lines = {line for line, n in line_counts.items() if n >= max(3, len(data["blocks"]) // 2)}
+        chunks = [{**chunk, "text": "\n".join(line for line in chunk["text"].splitlines()
+                                         if line.strip() not in repeated_lines)} for chunk in chunks]
     batches = []
     for chunk, quota in zip(chunks, allocate_questions(chunks, count)):
         while quota:
@@ -109,6 +122,7 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
     stats["batches"] = len(batches)
     stats["generated"] = 0
     accepted = []
+    seen_questions = set()
     for attempt, (chunk, batch_size) in enumerate(batches, 1):
         if len(accepted) >= count:
             break
@@ -117,15 +131,17 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
         prompt = render_prompt(template, chunk, len(accepted) + 1, count, accepted, batch_size)
         schema = mcq_schema_for_chunk(chunk)
         if not verify:
-            schema["properties"]["questions"]["items"]["required"] = [
-                "question", "choices", "correct_answer"]
+            item = schema["properties"]["questions"]["items"]
+            item["properties"] = {key: item["properties"][key]
+                                  for key in ("question", "choices", "correct_answer", "concept", "evidence")}
+            item["required"] = ["question", "choices", "correct_answer", "concept"]
         try:
             result = ask_json(
                 llm,
                 [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content": prompt}],
                 schema,
-                max_tokens=max(500, batch_size * 350),
+                max_tokens=max(260, batch_size * 220) if not verify else max(500, batch_size * 350),
                 temperature=0.3 if verify else 0.7,
             )
         except (ValueError, KeyError):
@@ -160,6 +176,11 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                 question["concept"] = str(question["concept"] or "Chưa phân loại")
                 question["verifier_status"] = "SKIPPED"
                 question["evidence_score"] = None
+                key = normalize_text(question["question"])
+                if key in seen_questions:
+                    stats["duplicate"] = stats.get("duplicate", 0) + 1
+                    continue
+                seen_questions.add(key)
                 accepted.append(question)
                 yield question, prompt
                 continue
@@ -430,13 +451,14 @@ def render_exam_message(message):
     with st.chat_message("assistant", avatar="🎓"):
         st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải JSON để đưa sang trang web làm bài.")
         if exam.get("verification_enabled") is False:
-            st.info("Bản nháp nhanh: giữ nguyên dẫn chứng và cả câu có thể trùng; chưa kiểm tra đáp án. Giảng viên nên rà soát trước khi giao bài.")
+            st.info("Bản nháp nhanh: giữ nguyên dẫn chứng, bỏ câu hỏi trùng nguyên văn; chưa kiểm tra đáp án. Giảng viên nên rà soát trước khi giao bài.")
         if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
             stats = exam.get("generation_stats", {})
             if exam.get("verification_enabled") is False:
                 st.warning(
                     f"Model trả {len(exam['questions'])}/{exam['requested_questions']} câu "
-                    f"sau {stats.get('batches', '?')} nhóm tạo đề; đã giữ tất cả câu nhận được."
+                    f"sau {stats.get('batches', '?')} nhóm tạo đề; "
+                    f"bỏ {stats.get('duplicate', 0)} câu trùng nguyên văn."
                 )
             else:
                 st.warning(
@@ -585,7 +607,7 @@ def main():
             st.rerun()
         model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=list(MODEL_OPTIONS.values()).index(MODEL))
         model_path = MODEL_OPTIONS[model_alias]
-        st.caption("modelv1: 1.7B, nhanh hơn · modelv2: 8B, mạnh hơn · modelv3: 4B, cân bằng")
+        st.caption("modelv1: 1.7B, dễ lặp · modelv2: 8B, chậm trên CPU · modelv3: 4B, khuyên dùng")
         with st.expander("Tùy chỉnh prompt tạo đề"):
             template = st.text_area("Prompt tạo đề", DEFAULT_PROMPT, height=240)
         verify = st.toggle("Kiểm tra đáp án bằng AI", value=False,
