@@ -35,10 +35,10 @@ def test_app():
     progress = []
     questions = list(generate_questions(model, data, 3, "Câu {index}/{total}; nhóm {count}\n{source}",
                                         on_attempt=lambda attempt, accepted: progress.append((attempt, accepted))))
-    assert len(questions) == 3
-    assert model.calls == 3
-    assert progress == [(1, 0), (2, 1), (3, 2)]
-    assert "Câu 1/3; nhóm 1" in questions[0][1]
+    assert len(questions) == 1
+    assert model.calls == 1
+    assert progress == [(1, 0)]
+    assert "Câu 1/3; nhóm 3" in questions[0][1]
     assert "Dữ kiện gốc." in render_prompt("{source}", data["chunks"][0], 1, 3, [])
     app = AppTest.from_file("mcq_streamlit.py").run(timeout=30)
     assert not app.exception, app.exception
@@ -105,8 +105,34 @@ def test_generation_has_bounded_batches_and_validates_each_question():
     assert duplicate_stats["duplicate"] == 2
 
     draft = list(generate_questions(FakeModel(), data, 6, mcq_streamlit.DEFAULT_PROMPT, verify=False))
-    assert len(draft) == 6
-    assert draft[0][0]["question"] == draft[3][0]["question"]
+    assert len(draft) == 2
+
+    class KeepWholeBatch(FakeModel):
+        def generate_text(self, messages, **kwargs):
+            self.calls += 1
+            assert kwargs["schema"]["properties"]["questions"]["items"]["required"] == [
+                "question", "choices", "correct_answer"]
+            return json.dumps({"questions": [
+                {"question": "Câu trùng?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+                 "correct_answer": "A", "evidence": "Dẫn chứng không có trong tài liệu."},
+                {"question": "Câu trùng?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+                 "correct_answer": "A"},
+                {"question": "Câu thiếu đáp án?", "choices": {"A": "Một"},
+                 "correct_answer": None},
+                {"question": "Câu sinh dư?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+                 "correct_answer": "B"},
+            ]})
+
+    whole_model = KeepWholeBatch()
+    whole_stats = {}
+    whole_batch = [question for question, _ in generate_questions(
+        whole_model, data, 3, mcq_streamlit.DEFAULT_PROMPT, verify=False, stats=whole_stats)]
+    assert whole_model.calls == 1
+    assert len(whole_batch) == whole_stats["generated"] == whole_stats["accepted"] == 4
+    assert whole_batch[0]["evidence"] == "Dẫn chứng không có trong tài liệu."
+    assert whole_batch[0]["question"] == whole_batch[1]["question"]
+    assert whole_batch[2]["correct_answer"] == ""
+    assert whole_batch[2]["choices"]["D"] == ""
 
     class UncheckedEvidence(FakeModel):
         def generate_text(self, messages, **kwargs):
@@ -160,6 +186,12 @@ def test_exam_file_and_count():
             assert mcq_streamlit.EXAM_TXT.read_text(encoding="utf-8") == format_exam_txt(exam)
             assert "Đáp án:" not in format_exam_txt(exam)
             snapshots = []
+            class FastBatchModel(VerifierModel):
+                def generate_text(self, messages, **kwargs):
+                    result = json.loads(super().generate_text(messages, **kwargs))
+                    return json.dumps({"questions": result["questions"] * 3})
+
+            mcq_streamlit.load_model = lambda path: FastBatchModel()
             fast_exam = create_exam(uploaded, model_path, 3, "{source}", verify=False,
                                     on_question=lambda partial: snapshots.append(
                                         json.loads(mcq_streamlit.EXAM.read_text(encoding="utf-8"))["accepted_questions"]))
@@ -215,6 +247,7 @@ def test_scoring_and_teacher_chat():
         "Hình học": {"correct": 0, "total": 2},
     }
     assert report["details"][2]["student_answer"] == "Bỏ trống"
+    assert score_attempt([dict(questions[0], correct_answer="")], {})["correct"] == 0
 
     class ChatModel:
         def generate_text(self, messages, **kwargs):
@@ -247,6 +280,13 @@ def test_one_chat_from_exam_to_review():
     }).encode("utf-8"))
     attempt = import_result(uploaded, exam)
     assert attempt["report"]["correct"] == 1
+    ungradable = dict(exam, questions=[dict(exam["questions"][0], correct_answer="")])
+    try:
+        import_result(uploaded, ungradable)
+    except ValueError as exc:
+        assert "thiếu đáp án" in str(exc)
+    else:
+        raise AssertionError("Đã chấm câu chưa có đáp án đúng")
     for invalid in (
         {"exam_id": "wrong", "student": "A", "answers": {"1": "A"}},
         {"exam_id": "demo-exam", "student": "A", "answers": {"9": "A"}},
@@ -339,6 +379,7 @@ def test_attempts_are_saved():
 
 if __name__ == "__main__":
     test_app()
+    test_generation_has_bounded_batches_and_validates_each_question()
     test_exam_file_and_count()
     test_stopped_exam_is_kept_in_chat()
     test_scoring_and_teacher_chat()

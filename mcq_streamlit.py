@@ -46,11 +46,9 @@ Bạn là người ra đề trắc nghiệm. Chỉ dùng thông tin trong SOURCE
 Hãy viết tối đa {count} câu mới, bắt đầu từ câu thứ {index} trong tổng {total} câu được yêu cầu.
 - Viết bằng tiếng Việt, giữ nguyên thuật ngữ chuyên ngành.
 - Có đúng 4 lựa chọn A/B/C/D và chỉ một đáp án đúng.
-- Đáp án và giải thích phải được SOURCE hỗ trợ.
-- evidence phải trích từ SOURCE; source_type và source_index phải đúng.
-- Sao chép evidence nguyên văn từ SOURCE; không tự diễn giải dẫn chứng.
+- Ưu tiên đáp án dựa trên SOURCE. Nếu có dẫn chứng thì ghi đoạn liên quan; không cần chép nguyên văn.
+- Có thể thêm concept, difficulty, explanation và nguồn nếu có.
 - Nếu SOURCE không đủ thông tin, tạo ít câu hơn hoặc trả danh sách questions rỗng.
-Nguồn hợp lệ: {allowed_sources}
 Các câu đã tạo, không lặp lại: {previous_questions}
 
 SOURCE:
@@ -104,7 +102,7 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
     batches = []
     for chunk, quota in zip(chunks, allocate_questions(chunks, count)):
         while quota:
-            batch_size = min(3 if verify else 1, quota)
+            batch_size = min(3, quota)
             batches.append((chunk, batch_size))
             quota -= batch_size
     stats = stats if stats is not None else {}
@@ -112,17 +110,21 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
     stats["generated"] = 0
     accepted = []
     for attempt, (chunk, batch_size) in enumerate(batches, 1):
-        if len(accepted) == count:
+        if len(accepted) >= count:
             break
         if on_attempt:
             on_attempt(attempt, len(accepted))
         prompt = render_prompt(template, chunk, len(accepted) + 1, count, accepted, batch_size)
+        schema = mcq_schema_for_chunk(chunk)
+        if not verify:
+            schema["properties"]["questions"]["items"]["required"] = [
+                "question", "choices", "correct_answer"]
         try:
             result = ask_json(
                 llm,
                 [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content": prompt}],
-                mcq_schema_for_chunk(chunk),
+                schema,
                 max_tokens=max(500, batch_size * 350),
                 temperature=0.3 if verify else 0.7,
             )
@@ -136,62 +138,72 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
         stats["generated"] += len(questions)
         if not questions:
             stats["empty"] = stats.get("empty", 0) + 1
-        for question in questions[:batch_size]:
+        for question in (questions[:batch_size] if verify else questions):
             question = normalize_mcq_format(question, chunk)
             if not verify:
+                if not isinstance(question, dict):
+                    question = {"question": str(question or "")}
+                question["question"] = str(question.get("question") or "")
+                choices = question.get("choices")
+                question["choices"] = {
+                    letter: str(choices.get(letter) or "") if isinstance(choices, dict) else ""
+                    for letter in "ABCD"
+                }
+                if question.get("correct_answer") not in {"A", "B", "C", "D"}:
+                    question["correct_answer"] = ""
                 question.setdefault("concept", "Chưa phân loại")
                 question.setdefault("difficulty", "easy")
                 question.setdefault("explanation", "")
                 question.setdefault("evidence", "")
                 question.setdefault("source_type", chunk["source_types"][0])
                 question.setdefault("source_index", chunk["source_indices"][0])
+                question["concept"] = str(question["concept"] or "Chưa phân loại")
+                question["verifier_status"] = "SKIPPED"
+                question["evidence_score"] = None
+                accepted.append(question)
+                yield question, prompt
+                continue
             issues = validate_mcq(question, source_map)
-            if not verify:
-                issues = [issue for issue in issues if issue not in (
-                    "evidence rỗng", "explanation rỗng", "source không tồn tại trong tài liệu")]
             if issues:
                 stats["structure"] = stats.get("structure", 0) + 1
                 continue
             source_key = (question["source_type"], question["source_index"])
-            if verify and source_key not in zip(chunk["source_types"], chunk["source_indices"]):
+            if source_key not in zip(chunk["source_types"], chunk["source_indices"]):
                 stats["structure"] = stats.get("structure", 0) + 1
                 continue
-            if verify and len(deduplicate(accepted + [question])) == len(accepted):
+            if len(deduplicate(accepted + [question])) == len(accepted):
                 stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
-            if verify:
-                if on_attempt:
-                    on_attempt(attempt, len(accepted))
-                try:
-                    verdict = ask_json(
-                        llm,
-                        [{"role": "system", "content": "Bạn là verifier nghiêm ngặt. Chỉ dựa trên SOURCE."},
-                         {"role": "user", "content": build_verifier_prompt(question, source_map[source_key])}],
-                        VERIFY_SCHEMA, max_tokens=1200, temperature=0,
-                    )
-                except ValueError:
-                    stats["verifier_error"] = stats.get("verifier_error", 0) + 1
+            if on_attempt:
+                on_attempt(attempt, len(accepted))
+            try:
+                verdict = ask_json(
+                    llm,
+                    [{"role": "system", "content": "Bạn là verifier nghiêm ngặt. Chỉ dựa trên SOURCE."},
+                     {"role": "user", "content": build_verifier_prompt(question, source_map[source_key])}],
+                    VERIFY_SCHEMA, max_tokens=1200, temperature=0,
+                )
+            except ValueError:
+                stats["verifier_error"] = stats.get("verifier_error", 0) + 1
+                continue
+            status = verdict.get("status")
+            if status == "REVISE":
+                revised = normalize_mcq_format(verdict.get("corrected_question"), chunk)
+                if validate_mcq(revised, source_map):
+                    stats["revision"] = stats.get("revision", 0) + 1
                     continue
-                status = verdict.get("status")
-                if status == "REVISE":
-                    revised = normalize_mcq_format(verdict.get("corrected_question"), chunk)
-                    if validate_mcq(revised, source_map):
-                        stats["revision"] = stats.get("revision", 0) + 1
-                        continue
-                    revised_key = (revised["source_type"], revised["source_index"])
-                    if revised_key not in zip(chunk["source_types"], chunk["source_indices"]):
-                        stats["revision"] = stats.get("revision", 0) + 1
-                        continue
-                    question = revised
-                    source_key = revised_key
-                elif status != "PASS":
-                    stats["verifier_reject"] = stats.get("verifier_reject", 0) + 1
+                revised_key = (revised["source_type"], revised["source_index"])
+                if revised_key not in zip(chunk["source_types"], chunk["source_indices"]):
+                    stats["revision"] = stats.get("revision", 0) + 1
                     continue
-                question["verifier_status"] = status
-            else:
-                question["verifier_status"] = "SKIPPED"
+                question = revised
+                source_key = revised_key
+            elif status != "PASS":
+                stats["verifier_reject"] = stats.get("verifier_reject", 0) + 1
+                continue
+            question["verifier_status"] = status
             question["evidence_score"] = None
-            if verify and len(deduplicate(accepted + [question])) == len(accepted):
+            if len(deduplicate(accepted + [question])) == len(accepted):
                 stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
             accepted.append(question)
@@ -271,7 +283,7 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=F
         if on_question:
             on_question(exam)
     if not questions:
-        raise ValueError("Không tạo được câu hỏi có cấu trúc dùng được; thử tài liệu có nhiều nội dung hơn.")
+        raise ValueError("Model chưa trả về câu hỏi nào; thử tài liệu có nhiều nội dung hơn.")
     write_json(EXAM, exam)
     save_results(results)
     EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
@@ -296,7 +308,7 @@ def read_exam():
         if (not isinstance(question, dict) or not isinstance(question.get("question"), str)
                 or not isinstance(question.get("choices"), dict)
                 or set(question["choices"]) != set("ABCD")
-                or question.get("correct_answer") not in ("A", "B", "C", "D")):
+                or question.get("correct_answer") not in ("", "A", "B", "C", "D")):
             raise ValueError("Đề có câu hỏi không hợp lệ")
     return exam
 
@@ -307,7 +319,7 @@ def score_attempt(questions, answers):
     correct = 0
     for position, question in enumerate(questions, 1):
         answer = answers.get(str(question.get("id", position)), "")
-        is_correct = answer == question["correct_answer"]
+        is_correct = bool(question["correct_answer"]) and answer == question["correct_answer"]
         correct += is_correct
         concept = question.get("concept") or "Chưa phân loại"
         totals = by_concept.setdefault(concept, {"correct": 0, "total": 0})
@@ -340,6 +352,10 @@ def import_result(uploaded, exam):
         raise ValueError("exam_id không khớp với bộ đề đang mở.")
     if not exam.get("questions"):
         raise ValueError("Bộ đề chưa có câu hỏi để chấm.")
+    if any(question.get("correct_answer") not in {"A", "B", "C", "D"} or
+           any(not question["choices"].get(letter) for letter in "ABCD")
+           for question in exam["questions"]):
+        raise ValueError("Bộ đề có câu thiếu đáp án hoặc lựa chọn; giảng viên cần rà soát trước khi chấm.")
     student = data.get("student")
     answers = data.get("answers")
     if not isinstance(student, str) or not student.strip():
@@ -412,17 +428,23 @@ def render_exam_message(message):
             st.info("Bản nháp nhanh: giữ nguyên dẫn chứng và cả câu có thể trùng; chưa kiểm tra đáp án. Giảng viên nên rà soát trước khi giao bài.")
         if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
             stats = exam.get("generation_stats", {})
-            st.warning(
-                f"Chỉ giữ {len(exam['questions'])}/{exam['requested_questions']} câu dùng được "
-                f"sau {stats.get('batches', '?')} nhóm tạo đề. "
-                "Model không tạo đủ số câu được yêu cầu."
-            )
-            st.caption(
-                f"Model tạo {stats.get('generated', '?')} câu; loại do cấu trúc: {stats.get('structure', 0)}, "
-                f"kiểm tra nội dung: "
-                f"{stats.get('verifier_reject', 0) + stats.get('verifier_error', 0) + stats.get('revision', 0)}, "
-                f"trùng lặp: {stats.get('duplicate', 0)}."
-            )
+            if exam.get("verification_enabled") is False:
+                st.warning(
+                    f"Model trả {len(exam['questions'])}/{exam['requested_questions']} câu "
+                    f"sau {stats.get('batches', '?')} nhóm tạo đề; đã giữ tất cả câu nhận được."
+                )
+            else:
+                st.warning(
+                    f"Chỉ giữ {len(exam['questions'])}/{exam['requested_questions']} câu dùng được "
+                    f"sau {stats.get('batches', '?')} nhóm tạo đề. "
+                    "Model không tạo đủ số câu được yêu cầu."
+                )
+                st.caption(
+                    f"Model tạo {stats.get('generated', '?')} câu; loại do cấu trúc: {stats.get('structure', 0)}, "
+                    f"kiểm tra nội dung: "
+                    f"{stats.get('verifier_reject', 0) + stats.get('verifier_error', 0) + stats.get('revision', 0)}, "
+                    f"trùng lặp: {stats.get('duplicate', 0)}."
+                )
         st.download_button(
             "⬇ Tải dữ liệu đề JSON", json.dumps(exam, ensure_ascii=False, indent=2),
             file_name=f"{Path(exam['document']).stem}_questions.json", mime="application/json",
