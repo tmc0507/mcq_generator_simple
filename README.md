@@ -152,8 +152,8 @@ Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
 1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Chế độ mặc định tạo từng nhóm tối đa 3 câu: giữ câu model trả về, chỉ bỏ câu hỏi trùng nguyên văn; không kiểm tra dẫn chứng và không gọi verifier AI. Từng câu được ghi ngay vào `output/questions.json`, nên có thể giữ phần đã tạo nếu dừng.
 2. Bấm **Tải dữ liệu đề JSON** để chuyển bộ đề sang trang web làm bài. File chứa `exam_id`, câu hỏi, lựa chọn và đáp án; bản TXT chỉ chứa câu hỏi và lựa chọn. Số câu thực tế có thể ít hơn hoặc nhiều hơn số yêu cầu nếu model trả thiếu hoặc sinh dư trong một nhóm.
-3. Trang web khác thu đáp án của sinh viên và gửi lại một file JSON theo mẫu dưới đây. Đính kèm file đó bằng dấu **+**; app chấm lại theo đề có cùng `exam_id` và lưu kết quả vào `output/attempts.json`.
-4. Hỏi tiếp trong chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Nhận xét dựa trên kết quả vừa nhập, không đánh giá năng lực toàn diện từ một bài kiểm tra.
+3. Trang web khác thu đáp án của sinh viên và ghi **mỗi bài làm thành một file JSON** trong `output/student_results/` theo mẫu dưới đây. App tự đọc thư mục khi giảng viên hỏi trong chat. Vẫn có thể đính kèm JSON bằng dấu **+**; cách này lưu kết quả vào `output/attempts.json`.
+4. Hỏi `Nhận xét sinh viên SV001` hoặc `Nhận xét sinh viên Nguyễn Văn An` để xem bài nộp mới nhất của người đó. Hỏi `Nhận xét buổi kiểm tra hôm nay` để xem tất cả sinh viên có file được ghi trong ngày hiện tại, tính từ file đầu tiên đến lúc hỏi. App chấm theo bộ đề đang mở và dùng một lượt model cho gợi ý ôn tập chung của cả lớp.
 
 ```json
 {
@@ -165,9 +165,11 @@ Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
 `answers` dùng ID câu hỏi làm khóa; giá trị là `A`, `B`, `C`, `D` hoặc chuỗi rỗng nếu bỏ trống. App từ chối file có `exam_id` không khớp hoặc đáp án không hợp lệ. Giao diện này không có bước sinh viên làm bài.
 
+Tạo thư mục bằng `mkdir -p output/student_results`, rồi để web ghi file như `output/student_results/SV001.json`. Thời điểm nhận là thời điểm file được ghi trên máy chạy app; khi có nhiều file cho cùng một sinh viên và bộ đề, app lấy file mới nhất. Truy vấn “hôm nay” dùng ngày giờ địa phương của máy; file sai form hoặc thuộc bộ đề khác được bỏ qua. Thư mục `output/` đã nằm trong `.gitignore`, nên dữ liệu bài làm không được đưa lên GitHub.
+
 Xem [form trống](examples/student_result.template.json), [bài làm ví dụ](examples/student_result.example.json) và [nhận xét modelv1](examples/feedback.example.md). Bài làm ví dụ khớp với [đề ví dụ](examples/demo_exam.json): sinh viên đúng câu 1 và 4, sai câu 2, bỏ trống câu 3, nên được 2/4. Web làm bài cần lấy `exam_id` và các `id` câu hỏi từ file `questions.json` vừa tải, rồi xuất JSON UTF-8 theo đúng form này; không cần gửi đáp án đúng hay điểm số. Nếu sinh viên bỏ trống một câu, dùng chuỗi rỗng hoặc bỏ khóa câu đó trong `answers`. Trong giao diện thật, chỉ nhận xét được kết quả có `exam_id` trùng với bộ đề đang mở. Số liệu và danh sách câu chưa đúng được app chấm trực tiếp; model chỉ gợi ý ôn tập.
 
-[Ví dụ World Model 10 câu](examples/world_model/questions.json) dùng chính bộ đề xuất từ `World(1)(3).docx`. [Bài làm mẫu](examples/world_model/student_result.json) đúng 5/10; [nhận xét từ modelv3](examples/world_model/feedback.md) cho thấy cách app trả lời. Đính kèm bài làm mẫu trong chat khi bộ đề đang mở có cùng `exam_id` để thử luồng nhận xét.
+[Ví dụ World Model 10 câu](examples/world_model/questions.json) dùng chính bộ đề xuất từ `World(1)(3).docx`. [Bài làm mẫu](examples/world_model/student_result.json) đúng 5/10; [nhận xét từ modelv3](examples/world_model/feedback.md) cho thấy cách app trả lời. Sao chép bài làm mẫu vào `output/student_results/SV005.json` khi bộ đề đang mở có cùng `exam_id`, rồi hỏi `Nhận xét SV005` để thử luồng tự đọc thư mục.
 
 Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 

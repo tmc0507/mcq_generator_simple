@@ -2,12 +2,14 @@
 
 import json
 import fcntl
+from io import BytesIO
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import uuid
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +27,7 @@ OUTPUT = SOURCE / "output/mcq_questions.txt"
 EXAM = SOURCE / "output/questions.json"
 EXAM_TXT = SOURCE / "output/questions.txt"
 ATTEMPTS = SOURCE / "output/attempts.json"
+RESULTS_INBOX = SOURCE / "output/student_results"
 DOCUMENT_TYPES = {".pdf", ".docx", ".pptx", ".csv", ".doc", ".ppt"}
 MODEL_OPTIONS = {"modelv1": SMALL_MODEL, "modelv2": LARGE_MODEL, "modelv3": MEDIUM_MODEL}
 sys.path.insert(0, str(SOURCE / "scripts"))
@@ -413,15 +416,40 @@ def save_attempt(attempt):
         write_json(ATTEMPTS, attempts)
 
 
-def teacher_reply(llm, question, report):
-    all_misses = [item for item in report["details"] if not item["correct"]]
-    strengths = [f"- {concept}: đúng {score['correct']}/{score['total']} câu."
-                 for concept, score in report["by_concept"].items() if score["correct"]]
-    weaknesses = [f"- Câu {item['id']} ({item['concept']}): " +
-                  ("bỏ trống." if item["student_answer"] == "Bỏ trống" else
-                   f"trả lời {item['student_answer']}, đáp án {item['correct_answer']}.")
-                  for item in all_misses]
-    weak_topics = list(dict.fromkeys(item["concept"] for item in all_misses))
+def search_key(value):
+    value = unicodedata.normalize("NFKD", value.casefold().replace("đ", "d"))
+    return " ".join("".join(char for char in value if not unicodedata.combining(char)).split())
+
+
+def inbox_attempts(exam, today=False):
+    RESULTS_INBOX.mkdir(parents=True, exist_ok=True)
+    now = datetime.now().astimezone()
+    latest = {}
+    skipped = 0
+    for path in RESULTS_INBOX.glob("*.json"):
+        try:
+            received = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+            if today and received.date() != now.date():
+                continue
+            attempt = import_result(BytesIO(path.read_bytes()), exam)
+        except (OSError, ValueError):
+            skipped += 1
+            continue
+        key = search_key(attempt["student"])
+        if key not in latest or received > latest[key]["received"]:
+            latest[key] = {"attempt": attempt, "received": received}
+    return sorted(latest.values(), key=lambda item: item["received"]), skipped
+
+
+def student_matches(prompt, student):
+    text = search_key(prompt)
+    aliases = [student, *re.split(r"\s+-\s+", student)]
+    return any(len(alias.strip()) >= 3 and re.search(
+        rf"(?<!\w){re.escape(search_key(alias))}(?!\w)", text)
+        for alias in aliases)
+
+
+def study_suggestion(llm, question, weak_topics):
     raw = llm.generate_text(
         [{"role": "system", "content":
           "/no_think\nChỉ viết một câu bắt đầu bằng 'Nên ôn lại', gợi ý cách ôn các chủ đề được nêu. "
@@ -439,11 +467,49 @@ def teacher_reply(llm, question, report):
             any(word in suggestion.lower() for word in ("sinh viên", "trả lời", "đáp án", "điểm số", "hạn chế"))):
         suggestion = (f"Nên ôn lại {', '.join(weak_topics)} qua bài giảng và câu hỏi luyện tập."
                       if weak_topics else "Tiếp tục luyện tập để duy trì kết quả.")
+    return suggestion
+
+
+def teacher_reply(llm, question, report):
+    all_misses = [item for item in report["details"] if not item["correct"]]
+    strengths = [f"- {concept}: đúng {score['correct']}/{score['total']} câu."
+                 for concept, score in report["by_concept"].items() if score["correct"]]
+    weaknesses = [f"- Câu {item['id']} ({item['concept']}): " +
+                  ("bỏ trống." if item["student_answer"] == "Bỏ trống" else
+                   f"trả lời {item['student_answer']}, đáp án {item['correct_answer']}.")
+                  for item in all_misses]
+    weak_topics = list(dict.fromkeys(item["concept"] for item in all_misses))
+    suggestion = study_suggestion(llm, question, weak_topics)
     return "\n".join([
         "**Điểm mạnh**", *(strengths or ["- Chưa có câu trả lời đúng."]),
         "**Cần cải thiện**", *(weaknesses or ["- Không có câu trả lời sai hoặc bỏ trống."]),
         "**Gợi ý ôn tập**", suggestion,
     ])
+
+
+def class_reply(llm, question, records, skipped=0):
+    now = datetime.now().astimezone()
+    scores = [item["attempt"]["report"]["percent"] for item in records]
+    lines = [f"**Buổi kiểm tra hôm nay ({now:%d/%m/%Y})**",
+             f"Đã nhận {len(records)} sinh viên từ {records[0]['received']:%H:%M} đến {now:%H:%M}. "
+             f"Điểm trung bình: {sum(scores) / len(scores):.1f}%."]
+    if skipped:
+        lines.append(f"Bỏ qua {skipped} file không hợp lệ hoặc không thuộc bộ đề đang mở.")
+    weak_topics = Counter()
+    for item in records:
+        attempt = item["attempt"]
+        report = attempt["report"]
+        strong = [name for name, score in report["by_concept"].items() if score["correct"]]
+        weak = [name for name, score in report["by_concept"].items() if score["correct"] < score["total"]]
+        weak_topics.update(weak)
+        lines.extend([
+            f"**{attempt['student']}** — {report['correct']}/{report['total']} ({report['percent']}%).",
+            f"- Điểm mạnh: {', '.join(strong) or 'Chưa có chủ đề trả lời đúng'}.",
+            f"- Cần cải thiện: {', '.join(weak) or 'Không có câu sai'}.",
+        ])
+    lines.extend(["**Gợi ý chung**", study_suggestion(
+        llm, question, [name for name, _ in weak_topics.most_common(8)])])
+    return "\n".join(lines)
 
 
 def render_exam_message(message):
@@ -485,7 +551,7 @@ def render_exam_message(message):
 
 
 def chat_view(model_path, template, verify=False):
-    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu để tạo đề; nhận kết quả JSON từ trang làm bài để nhận xét.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu để tạo đề; đặt file kết quả vào output/student_results rồi hỏi nhận xét.</p></div>', unsafe_allow_html=True)
     messages = st.session_state.setdefault("messages", [])
     stopped = st.session_state.pop("generating_exam", False)
     partial = st.session_state.pop("partial_exam", None)
@@ -503,7 +569,7 @@ def chat_view(model_path, template, verify=False):
         messages.append({"role": "assistant", "content": "Đã dừng tạo đề trước khi có câu hỏi hợp lệ."})
     if not messages:
         with st.chat_message("assistant", avatar="🎓"):
-            st.write("Xin chào! Bấm **+** để chọn tài liệu và tạo đề JSON. Khi có kết quả từ trang làm bài, đính kèm file JSON rồi hỏi tôi nhận xét.")
+            st.write("Xin chào! Bấm **+** để chọn tài liệu và tạo đề JSON. Đặt kết quả từ trang làm bài vào `output/student_results/`, rồi hỏi nhận xét theo tên, mã sinh viên hoặc buổi kiểm tra hôm nay.")
     for message in messages:
         if message.get("kind") == "exam":
             render_exam_message(message)
@@ -571,19 +637,44 @@ def chat_view(model_path, template, verify=False):
         except Exception as exc:
             st.session_state.pop("generating_exam", None)
             messages.append({"role": "assistant", "content": f"Không tạo được đề: {exc}"})
-    elif "active_attempt" in st.session_state:
+    else:
         try:
-            with st.chat_message("assistant", avatar="🎓"):
-                with st.spinner("Đang nhận xét bài làm..."):
-                    answer = teacher_reply(load_model(model_path), prompt, st.session_state["active_attempt"]["report"])
+            exam = next((item["exam"] for item in reversed(messages)
+                         if item.get("kind") == "exam"), None) or read_exam()
+            today = "hom nay" in search_key(prompt)
+            records, skipped = inbox_attempts(exam, today=today) if exam else ([], 0)
+            matches = [item for item in records if student_matches(prompt, item["attempt"]["student"])]
+            if len(matches) > 1:
+                names = ", ".join(item["attempt"]["student"] for item in matches)
+                answer = f"Có nhiều sinh viên khớp yêu cầu: {names}. Hãy ghi mã sinh viên cụ thể."
+            elif matches:
+                attempt = matches[0]["attempt"]
+                with st.chat_message("assistant", avatar="🎓"):
+                    with st.spinner(f"Đang nhận xét {attempt['student']}..."):
+                        answer = f"**{attempt['student']}** — " + teacher_reply(
+                            load_model(model_path), prompt, attempt["report"])
+            elif today:
+                if records:
+                    with st.chat_message("assistant", avatar="🎓"):
+                        with st.spinner(f"Đang nhận xét {len(records)} sinh viên..."):
+                            answer = class_reply(load_model(model_path), prompt, records, skipped)
+                else:
+                    answer = ("Chưa có kết quả hợp lệ của bộ đề đang mở được ghi vào "
+                              f"`{RESULTS_INBOX.relative_to(SOURCE)}/` hôm nay.")
+            elif "active_attempt" in st.session_state:
+                with st.chat_message("assistant", avatar="🎓"):
+                    with st.spinner("Đang nhận xét bài làm..."):
+                        answer = teacher_reply(load_model(model_path), prompt,
+                                               st.session_state["active_attempt"]["report"])
+            elif exam:
+                answer = (f"Chưa tìm thấy sinh viên trong `{RESULTS_INBOX.relative_to(SOURCE)}/`. "
+                          "Hãy ghi tên hoặc mã sinh viên có trong file kết quả, ví dụ ‘Nhận xét sinh viên SV001’, "
+                          "hoặc hỏi ‘Nhận xét buổi kiểm tra hôm nay’.")
+            else:
+                answer = "Chưa có bộ đề để đối chiếu kết quả. Hãy tạo đề hoặc mở `output/questions.json` trước."
             messages.append({"role": "assistant", "content": answer})
         except Exception as exc:
             messages.append({"role": "assistant", "content": f"Chưa thể nhận xét: {exc}"})
-    else:
-        answer = ("Hãy đính kèm file kết quả JSON từ trang làm bài trước khi yêu cầu nhận xét."
-                  if any(item.get("kind") == "exam" for item in messages) else
-                  "Hãy bấm dấu + để đính kèm tài liệu, rồi nhập yêu cầu như ‘Tạo 10 câu hỏi’." )
-        messages.append({"role": "assistant", "content": answer})
     st.rerun()
 
 

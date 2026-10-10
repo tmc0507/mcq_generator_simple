@@ -1,5 +1,7 @@
 import json
+import os
 import tempfile
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -428,6 +430,80 @@ def test_attempts_are_saved():
         mcq_streamlit.ATTEMPTS = original
 
 
+def test_inbox_finds_student_and_today_results():
+    exam = {"exam_id": "demo-exam", "document": "sample.csv", "questions": [
+        {"id": 1, "question": "Alpha?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+         "correct_answer": "A", "concept": "Đại số"},
+    ]}
+    original = mcq_streamlit.RESULTS_INBOX
+    try:
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            mcq_streamlit.RESULTS_INBOX = folder
+            def write(name, student, answer, exam_id="demo-exam"):
+                path = folder / name
+                path.write_text(json.dumps({"exam_id": exam_id, "student": student,
+                                            "answers": {"1": answer}}), encoding="utf-8")
+                return path
+            old = write("old.json", "SV001 - Nguyễn Văn An", "A")
+            yesterday = (datetime.now() - timedelta(days=1)).timestamp()
+            os.utime(old, (yesterday, yesterday))
+            write("new.json", "SV001 - Nguyễn Văn An", "B")
+            write("second.json", "SV002 - Trần Bình", "A")
+            write("other_exam.json", "SV003", "A", exam_id="other")
+            (folder / "broken.json").write_text("{", encoding="utf-8")
+            records, skipped = mcq_streamlit.inbox_attempts(exam, today=True)
+            assert len(records) == 2 and skipped == 2
+            assert {record["attempt"]["student"] for record in records} == {
+                "SV001 - Nguyễn Văn An", "SV002 - Trần Bình"}
+            assert next(record for record in records if record["attempt"]["student"].startswith("SV001"))[
+                "attempt"]["report"]["correct"] == 0
+            assert mcq_streamlit.student_matches("Nhận xét sinh viên Nguyen Van An", "SV001 - Nguyễn Văn An")
+            assert mcq_streamlit.student_matches("Nhận xét SV002", "SV002 - Trần Bình")
+            assert not mcq_streamlit.student_matches("Nhận xét sinh viên", "SV002 - Trần Bình")
+            class ReviewModel:
+                def generate_text(self, messages, **kwargs):
+                    return "Nên ôn lại Đại số."
+            summary = mcq_streamlit.class_reply(ReviewModel(), "Nhận xét buổi kiểm tra hôm nay", records, skipped)
+            assert "SV001" in summary and "SV002" in summary
+            assert "Điểm trung bình: 50.0%" in summary
+            assert "Bỏ qua 2 file" in summary
+    finally:
+        mcq_streamlit.RESULTS_INBOX = original
+
+
+def test_chat_reads_inbox_without_attachment():
+    exam = {"exam_id": "demo-exam", "document": "sample.csv", "questions": [
+        {"id": 1, "question": "Alpha?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+         "correct_answer": "A", "concept": "Đại số"},
+    ]}
+    with tempfile.TemporaryDirectory() as directory:
+        folder = Path(directory)
+        (folder / "result.json").write_text(json.dumps({
+            "exam_id": "demo-exam", "student": "SV001 - Nguyễn Văn An", "answers": {"1": "B"},
+        }), encoding="utf-8")
+        script = f'''import mcq_streamlit as app
+from pathlib import Path
+app.RESULTS_INBOX = Path({str(folder)!r})
+class ReviewModel:
+    def generate_text(self, messages, **kwargs):
+        return "Nên ôn lại Đại số."
+app.load_model = lambda path=None: ReviewModel()
+app.main()
+'''
+        app = AppTest.from_string(script).run(timeout=30)
+        app.session_state["messages"] = [{"role": "assistant", "kind": "exam", "id": "demo", "exam": exam}]
+        app.run(timeout=30)
+        app.chat_input[0].set_value("Nhận xét sinh viên Nguyễn Văn An").run(timeout=30)
+        assert not app.exception, app.exception
+        assert "SV001 - Nguyễn Văn An" in app.chat_message[-1].markdown[0].value
+        assert "Nên ôn lại Đại số" in app.chat_message[-1].markdown[0].value
+        app.chat_input[0].set_value("Nhận xét buổi kiểm tra hôm nay").run(timeout=30)
+        assert not app.exception, app.exception
+        assert "Buổi kiểm tra hôm nay" in app.chat_message[-1].markdown[0].value
+        assert "SV001 - Nguyễn Văn An" in app.chat_message[-1].markdown[0].value
+
+
 if __name__ == "__main__":
     test_app()
     test_generation_has_bounded_batches_and_validates_each_question()
@@ -440,4 +516,6 @@ if __name__ == "__main__":
     test_world_model_student_result()
     test_ui_generation_rechecks_revision()
     test_attempts_are_saved()
+    test_inbox_finds_student_and_today_results()
+    test_chat_reads_inbox_without_attachment()
     print("OK: số câu, prompt, giao diện, chấm bài và chat")
