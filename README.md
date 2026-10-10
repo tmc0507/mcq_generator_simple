@@ -165,6 +165,8 @@ Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
 `answers` dùng ID câu hỏi làm khóa; giá trị là `A`, `B`, `C`, `D` hoặc chuỗi rỗng nếu bỏ trống. App từ chối file có `exam_id` không khớp hoặc đáp án không hợp lệ. Giao diện này không có bước sinh viên làm bài.
 
+Xem [form trống](examples/student_result.template.json), [bài làm ví dụ](examples/student_result.example.json) và [nhận xét modelv1](examples/feedback.example.md). Bài làm ví dụ khớp với [đề ví dụ](examples/demo_exam.json): sinh viên đúng câu 1 và 4, sai câu 2, bỏ trống câu 3, nên được 2/4. Web làm bài cần lấy `exam_id` và các `id` câu hỏi từ file `questions.json` vừa tải, rồi xuất JSON UTF-8 theo đúng form này; không cần gửi đáp án đúng hay điểm số. Nếu sinh viên bỏ trống một câu, dùng chuỗi rỗng hoặc bỏ khóa câu đó trong `answers`. Trong giao diện thật, chỉ nhận xét được kết quả có `exam_id` trùng với bộ đề đang mở. Số liệu và danh sách câu chưa đúng được app chấm trực tiếp; model chỉ gợi ý ôn tập.
+
 Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B, mặc định), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 
 Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B` và giữ cả câu thiếu trường. Nếu câu thiếu đáp án hoặc lựa chọn, cần sửa trước khi chấm kết quả; app sẽ báo lỗi thay vì chấm sai. Giảng viên cần rà soát bản nháp trước khi giao bài. Bật **Kiểm tra đáp án bằng AI** nếu muốn dùng lại quy trình kiểm tra chặt hơn. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.

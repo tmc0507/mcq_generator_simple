@@ -393,31 +393,36 @@ def save_attempt(attempt):
 
 
 def teacher_reply(llm, question, report):
-    # shortcut: send at most 12 missed questions to fit the local model context; expand if longer exams are common.
     all_misses = [item for item in report["details"] if not item["correct"]]
-    misses = all_misses[:12]
-    facts = {key: report[key] for key in ("correct", "total", "percent", "by_concept")}
-    facts["missed_questions"] = misses
-    facts["omitted_missed_questions"] = len(all_misses) - len(misses)
+    strengths = [f"- {concept}: đúng {score['correct']}/{score['total']} câu."
+                 for concept, score in report["by_concept"].items() if score["correct"]]
+    weaknesses = [f"- Câu {item['id']} ({item['concept']}): " +
+                  ("bỏ trống." if item["student_answer"] == "Bỏ trống" else
+                   f"trả lời {item['student_answer']}, đáp án {item['correct_answer']}.")
+                  for item in all_misses]
+    weak_topics = list(dict.fromkeys(item["concept"] for item in all_misses))
     raw = llm.generate_text(
         [{"role": "system", "content":
-          "/no_think\nBạn là trợ lý cho giảng viên. Chỉ dựa trên kết quả bài làm được cung cấp. "
-          "Trả lời bằng tiếng Việt, tối đa 150 từ, theo ba mục: Điểm mạnh, Cần cải thiện, Gợi ý ôn tập. "
-          "Ở mục Cần cải thiện, liệt kê đủ số câu và chủ đề của từng câu trả lời sai. "
-          "Chỉ dùng cách nói 'trả lời đúng/sai'; không suy đoán sinh viên hiểu hay không hiểu. "
-          "Không kết luận năng lực hay tính cách toàn diện. Nếu dữ liệu thiếu, nói rõ."},
+          "/no_think\nChỉ viết một câu bắt đầu bằng 'Nên ôn lại', gợi ý cách ôn các chủ đề được nêu. "
+          "Không nhận xét sinh viên, câu hỏi, đáp án hay điểm số."},
          {"role": "user", "content":
-          f"Kết quả bài làm (JSON): {json.dumps(facts, ensure_ascii=False)}\n"
-          f"Các câu sai bắt buộc nhắc tới: {[(item['id'], item['concept']) for item in misses]}\n"
+          f"Chủ đề cần ôn: {', '.join(weak_topics) if weak_topics else 'Không có câu sai'}.\n"
           f"Câu hỏi của giảng viên: {question}"}],
-        max_new_tokens=450, temperature=0, do_sample=False,
+        max_new_tokens=100, temperature=0, do_sample=False,
     )
-    answer = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
-    if "<think>" in answer or not answer:
+    suggestion = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    if "<think>" in suggestion or not suggestion:
         raise ValueError("Model chưa trả lời xong; hãy thử lại với câu hỏi ngắn hơn.")
-    answer = re.sub(r"\b(?:đã )?nắm vững\b", "trả lời đúng câu hỏi về", answer, flags=re.IGNORECASE)
-    answer = re.sub(r"\bchưa hiểu(?: rõ)?\b", "trả lời sai câu hỏi về", answer, flags=re.IGNORECASE)
-    return answer
+    # shortcut: use a factual generic tip when the small model ignores the narrow format; revisit with stronger feedback evaluation.
+    if (not suggestion.startswith("Nên ôn lại") or
+            any(word in suggestion.lower() for word in ("sinh viên", "trả lời", "đáp án", "điểm số", "hạn chế"))):
+        suggestion = (f"Nên ôn lại {', '.join(weak_topics)} qua bài giảng và câu hỏi luyện tập."
+                      if weak_topics else "Tiếp tục luyện tập để duy trì kết quả.")
+    return "\n".join([
+        "**Điểm mạnh**", *(strengths or ["- Chưa có câu trả lời đúng."]),
+        "**Cần cải thiện**", *(weaknesses or ["- Không có câu trả lời sai hoặc bỏ trống."]),
+        "**Gợi ý ôn tập**", suggestion,
+    ])
 
 
 def render_exam_message(message):

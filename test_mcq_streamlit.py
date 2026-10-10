@@ -252,20 +252,23 @@ def test_scoring_and_teacher_chat():
     class ChatModel:
         def generate_text(self, messages, **kwargs):
             assert "Hình học" in messages[1]["content"]
-            assert "Bỏ trống" in messages[1]["content"]
+            assert "đáp án" in messages[0]["content"]
             assert kwargs["do_sample"] is False
-            return "<think>private</think>Ôn Hình học."
+            return "<think>private</think>Nên ôn lại Hình học."
 
-    assert teacher_reply(ChatModel(), "Cần ôn gì?", report) == "Ôn Hình học."
+    feedback = teacher_reply(ChatModel(), "Cần ôn gì?", report)
+    assert "Đại số: đúng 1/1 câu" in feedback
+    assert "Câu 2 (Hình học): trả lời D, đáp án B" in feedback
+    assert "Câu 3 (Hình học): bỏ trống" in feedback
+    assert feedback.endswith("Nên ôn lại Hình học.")
 
     class OverconfidentModel:
         def generate_text(self, messages, **kwargs):
-            assert "(2, 'Hình học')" in messages[1]["content"]
+            assert "Chủ đề cần ôn: Hình học" in messages[1]["content"]
             return "Sinh viên đã nắm vững Đại số nhưng chưa hiểu rõ Hình học."
 
-    assert teacher_reply(OverconfidentModel(), "Nhận xét?", report) == (
-        "Sinh viên trả lời đúng câu hỏi về Đại số nhưng trả lời sai câu hỏi về Hình học."
-    )
+    assert teacher_reply(OverconfidentModel(), "Nhận xét?", report).endswith(
+        "Nên ôn lại Hình học qua bài giảng và câu hỏi luyện tập.")
 
 
 def test_one_chat_from_exam_to_review():
@@ -301,7 +304,7 @@ def test_one_chat_from_exam_to_review():
     script = '''import mcq_streamlit as app
 class ReviewModel:
     def generate_text(self, messages, **kwargs):
-        return "**Điểm mạnh:** Trả lời đúng câu 1.\\n**Cần cải thiện:** Trả lời sai câu 2.\\n**Gợi ý ôn tập:** Ôn Hình học."
+        return "Nên ôn lại Hình học."
 app.load_model = lambda path=None: ReviewModel()
 app.main()
 '''
@@ -314,7 +317,7 @@ app.main()
     assert "Tải JSON" in app.chat_message[-1].markdown[0].value
     app.chat_input[0].set_value("Nhận xét bài làm").run(timeout=30)
     assert not app.exception, app.exception
-    assert "Ôn Hình học" in app.chat_message[-1].markdown[0].value
+    assert "ôn lại Hình học" in app.chat_message[-1].markdown[0].value
 
 
 def test_result_file_enters_review_flow():
@@ -348,6 +351,31 @@ finally:
         saved = json.loads(Path(directory, "attempts.json").read_text(encoding="utf-8"))
         assert saved[0]["exam_id"] == "demo-exam"
         assert any("Đã nhận kết quả" in item.value for item in app.markdown)
+
+
+def test_example_student_result():
+    folder = Path(__file__).parent / "examples"
+    exam = json.loads((folder / "demo_exam.json").read_text(encoding="utf-8"))
+    result = (folder / "student_result.example.json").read_bytes()
+    attempt = import_result(SimpleNamespace(getvalue=lambda: result), exam)
+    report = attempt["report"]
+    assert (report["correct"], report["total"], report["percent"]) == (2, 4, 50.0)
+    assert report["by_concept"] == {
+        "KNN": {"correct": 2, "total": 2},
+        "SVM": {"correct": 0, "total": 1},
+        "Naive Bayes": {"correct": 0, "total": 1},
+    }
+
+    class ReviewModel:
+        def generate_text(self, messages, **kwargs):
+            assert "SVM" in messages[1]["content"]
+            assert "Naive Bayes" in messages[1]["content"]
+            return "Nên ôn lại SVM và Naive Bayes, tập trung vào biên phân tách và định lý Bayes."
+
+    feedback = teacher_reply(ReviewModel(), "Nhận xét sinh viên này", report)
+    assert "KNN: đúng 2/2 câu" in feedback
+    assert "Câu 3 (Naive Bayes): bỏ trống" in feedback
+    assert "biên phân tách" in feedback
 
 
 def test_ui_generation_rechecks_revision():
@@ -385,6 +413,7 @@ if __name__ == "__main__":
     test_scoring_and_teacher_chat()
     test_one_chat_from_exam_to_review()
     test_result_file_enters_review_flow()
+    test_example_student_result()
     test_ui_generation_rechecks_revision()
     test_attempts_are_saved()
     print("OK: số câu, prompt, giao diện, chấm bài và chat")
