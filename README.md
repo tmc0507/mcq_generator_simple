@@ -97,13 +97,13 @@ Giao diện mặc định dùng `modelv1`: Qwen3-1.7B Q4_K_M GGUF (khoảng 1.2 
 | `modelv2.gguf` | Qwen3-8B Q4_K_M | Chất lượng cao hơn, chậm hơn |
 | `modelv3.gguf` | Qwen3-4B Q4_K_M | Mức trung gian |
 
-Sau khi clone GitHub, tải và ghép các model từ [GitHub Release models-v1](https://github.com/tmc0507/mcq_generator_simple/releases/tag/models-v1):
+Sau khi clone code từ GitHub, tải các file GGUF từ [thư mục Google Drive của project](https://drive.google.com/drive/folders/1aeogV0naaJXpfwNbGDlzKCgCKVbc8d8P?usp=drive_link), rồi đặt vào `models/` theo đúng tên trong bảng trên. Tạo thư mục nếu chưa có:
 
 ```bash
-bash scripts/download_models.sh
+mkdir -p models
 ```
 
-File model lớn được chia thành các phần dưới 2 GiB để upload lên GitHub Release; script kiểm tra SHA-256 sau khi ghép. Nếu chỉ cần bản nhẹ, chạy `bash scripts/download_models.sh modelv1`.
+GGUF không nằm trong GitHub repository. Chỉ cần `modelv1.gguf` để chạy giao diện với model mặc định; có thể bổ sung `modelv2.gguf` và `modelv3.gguf` sau.
 
 Cũng có thể tải trực tiếp từ Hugging Face. Các model gốc được phát hành theo giấy phép [Apache 2.0](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/LICENSE): [1.7B](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF), [4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [8B](https://huggingface.co/Qwen/Qwen3-8B-GGUF).
 
