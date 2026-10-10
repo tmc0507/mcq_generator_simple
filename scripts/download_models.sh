@@ -30,11 +30,12 @@ for name in "${names[@]}"; do
     continue
   fi
   temp="$(mktemp -d "$MODELS/.download.XXXXXX")"
-  assembled="$temp/$name.gguf"
+  assembled="$temp/assembled.gguf"
   : > "$assembled"
   for part in "${parts[@]}"; do
     echo "Downloading $part"
-    curl -fL --retry 2 --retry-delay 2 "$BASE/$part" -o "$temp/$part"
+    curl -fL --retry 8 --retry-all-errors --retry-delay 2 --continue-at - \
+      --silent --show-error "$BASE/$part" -o "$temp/$part"
     cat "$temp/$part" >> "$assembled"
     rm "$temp/$part"
   done
