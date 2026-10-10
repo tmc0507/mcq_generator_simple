@@ -89,14 +89,31 @@ Nếu máy thiếu dependency build hoặc CUDA compiler không tương thích, 
 
 ### Model nhẹ cho giao diện
 
-Giao diện mặc định dùng `modelv1`: Qwen3-1.7B Q4_K_M GGUF (khoảng 1.2 GB):
+Giao diện mặc định dùng `modelv1`: Qwen3-1.7B Q4_K_M GGUF (khoảng 1.2 GB). Ba file GGUF nằm trong thư mục `models/` theo tên:
+
+| Tên file | Model gốc | Vai trò |
+| --- | --- | --- |
+| `modelv1.gguf` | Qwen3-1.7B Q4_K_M | Nhanh nhất, mặc định |
+| `modelv2.gguf` | Qwen3-8B Q4_K_M | Chất lượng cao hơn, chậm hơn |
+| `modelv3.gguf` | Qwen3-4B Q4_K_M | Mức trung gian |
+
+Sau khi clone GitHub, tải và ghép các model từ [GitHub Release models-v1](https://github.com/tmc0507/mcq_generator_simple/releases/tag/models-v1):
+
+```bash
+bash scripts/download_models.sh
+```
+
+File model lớn được chia thành các phần dưới 2 GiB để upload lên GitHub Release; script kiểm tra SHA-256 sau khi ghép. Nếu chỉ cần bản nhẹ, chạy `bash scripts/download_models.sh modelv1`.
+
+Cũng có thể tải trực tiếp từ Hugging Face. Các model gốc được phát hành theo giấy phép [Apache 2.0](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/LICENSE): [1.7B](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF), [4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [8B](https://huggingface.co/Qwen/Qwen3-8B-GGUF).
 
 ```bash
 pip install -U huggingface_hub
 hf download ggml-org/Qwen3-1.7B-GGUF Qwen3-1.7B-Q4_K_M.gguf --local-dir models
+mv models/Qwen3-1.7B-Q4_K_M.gguf models/modelv1.gguf
 ```
 
-`modelv2` vẫn dùng `models/Qwen3-8B-Q4_K_M.gguf` khi cần model mạnh hơn. Trên chunk SVM mẫu, modelv1 tạo một câu trong khoảng 23 giây sau khi load trên máy CPU thử nghiệm; thời gian và chất lượng có thể khác theo tài liệu.
+Trên chunk SVM mẫu, modelv1 tạo một câu trong khoảng 23 giây sau khi load trên máy CPU thử nghiệm; thời gian và chất lượng có thể khác theo tài liệu.
 
 ### Model 8B cho CLI
 
@@ -109,7 +126,7 @@ Qwen3-8B-Q4_K_M.gguf
 Đặt tại:
 
 ```text
-models/Qwen3-8B-Q4_K_M.gguf
+models/modelv2.gguf
 ```
 
 Có thể tải bằng Hugging Face CLI:
@@ -118,7 +135,10 @@ Có thể tải bằng Hugging Face CLI:
 pip install -U huggingface_hub
 hf download Qwen/Qwen3-8B-GGUF Qwen3-8B-Q4_K_M.gguf \
   --local-dir models
+mv models/Qwen3-8B-Q4_K_M.gguf models/modelv2.gguf
 ```
+
+Bản 4B dùng lệnh `hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models`, sau đó đổi tên thành `models/modelv3.gguf`.
 
 Model khoảng 5 GB.
 
@@ -136,7 +156,7 @@ Mọi thao tác nằm trong **một cuộc trò chuyện**:
 3. Sinh viên nhập tên/mã, chọn đáp án và **Nộp bài** ngay trong thẻ đề. Kết quả lưu ở `output/attempts.json`.
 4. Nhập câu hỏi tiếp trong cùng ô chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Chatbot dùng kết quả bài vừa nộp; nhận xét từ một bài kiểm tra không phải đánh giá năng lực toàn diện.
 
-Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B, mặc định) và `modelv2` (GGUF 8B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
+Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B, mặc định), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 
 Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B`, nhưng vẫn yêu cầu 4 lựa chọn và một đáp án hợp lệ để chấm được. Dẫn chứng và câu trùng trong bản nháp không được kiểm tra; giảng viên phải rà soát trước khi giao bài. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
 
@@ -147,7 +167,7 @@ Model được cache để tạo đề và chat dùng cùng một bản trong RA
 ```bash
 ./run.sh \
   "input/Slides CHAPTER - SVM.pdf" \
-  "models/Qwen3-8B-Q4_K_M.gguf" \
+  "models/modelv2.gguf" \
   20
 ```
 
@@ -161,7 +181,7 @@ Hoặc chạy từng bước:
 python3 scripts/generate_mcq.py \
   --backend llama_cpp \
   --chunks work/chunks.json \
-  --model models/Qwen3-8B-Q4_K_M.gguf \
+  --model models/modelv2.gguf \
   --questions 20 \
   --n-ctx 8192 \
   --n-gpu-layers 20 \

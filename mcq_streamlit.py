@@ -15,16 +15,17 @@ import streamlit as st
 
 
 SOURCE = Path(__file__).resolve().parent
-SMALL_MODEL = SOURCE / "models/Qwen3-1.7B-Q4_K_M.gguf"
-LARGE_MODEL = SOURCE / "models/Qwen3-8B-Q4_K_M.gguf"
-MODEL = SMALL_MODEL if SMALL_MODEL.is_file() else LARGE_MODEL
+SMALL_MODEL = SOURCE / "models/modelv1.gguf"
+LARGE_MODEL = SOURCE / "models/modelv2.gguf"
+MEDIUM_MODEL = SOURCE / "models/modelv3.gguf"
+MODEL = next((path for path in (SMALL_MODEL, MEDIUM_MODEL, LARGE_MODEL) if path.is_file()), SMALL_MODEL)
 INPUT = SOURCE / "input"
 OUTPUT = SOURCE / "output/mcq_questions.txt"
 EXAM = SOURCE / "output/questions.json"
 EXAM_TXT = SOURCE / "output/questions.txt"
 ATTEMPTS = SOURCE / "output/attempts.json"
 DOCUMENT_TYPES = {".pdf", ".docx", ".pptx", ".csv", ".doc", ".ppt"}
-MODEL_OPTIONS = {"modelv1": SMALL_MODEL, "modelv2": LARGE_MODEL}
+MODEL_OPTIONS = {"modelv1": SMALL_MODEL, "modelv2": LARGE_MODEL, "modelv3": MEDIUM_MODEL}
 sys.path.insert(0, str(SOURCE / "scripts"))
 
 from generate_mcq import (  # noqa: E402
@@ -543,9 +544,9 @@ def main():
             for key in ("messages", "active_exam_id", "active_attempt", "partial_exam", "generating_exam"):
                 st.session_state.pop(key, None)
             st.rerun()
-        model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=0 if SMALL_MODEL.is_file() else 1)
+        model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=list(MODEL_OPTIONS.values()).index(MODEL))
         model_path = MODEL_OPTIONS[model_alias]
-        st.caption("modelv1: 1.7B, nhanh hơn · modelv2: 8B, mạnh hơn")
+        st.caption("modelv1: 1.7B, nhanh hơn · modelv2: 8B, mạnh hơn · modelv3: 4B, cân bằng")
         with st.expander("Tùy chỉnh prompt tạo đề"):
             template = st.text_area("Prompt tạo đề", DEFAULT_PROMPT, height=240)
         verify = st.toggle("Kiểm tra đáp án bằng AI", value=False,

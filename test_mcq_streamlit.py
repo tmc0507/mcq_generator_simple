@@ -45,7 +45,10 @@ def test_app():
     assert app.chat_input[0].proto.accept_file
     assert str(app.chat_input[0].proto.submit_mode) == "2"
     assert set(app.chat_input[0].proto.file_type) == {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv"}
-    assert app.selectbox[0].value in {"modelv1", "modelv2"}
+    assert app.selectbox[0].value in {"modelv1", "modelv2", "modelv3"}
+    assert tuple(mcq_streamlit.MODEL_OPTIONS) == ("modelv1", "modelv2", "modelv3")
+    assert [path.name for path in mcq_streamlit.MODEL_OPTIONS.values()] == [
+        "modelv1.gguf", "modelv2.gguf", "modelv3.gguf"]
     assert app.toggle[0].label == "Kiểm tra đáp án bằng AI"
     assert app.toggle[0].value is False
     assert app.text_area[0].value
