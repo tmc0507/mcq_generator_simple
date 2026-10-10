@@ -1,0 +1,40 @@
+name: Publish GGUF models
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download, verify, and upload models
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir assets
+          cd assets
+
+          curl -fL --retry 2 --silent --show-error \
+            'https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF/resolve/main/Qwen3-1.7B-Q4_K_M.gguf' \
+            -o modelv1.gguf
+          echo 'd2387ca2dbfee2ffabce7120d3770dadca0b293052bc2f0e138fdc940d9bc7b5  modelv1.gguf' | sha256sum -c -
+          gh release upload models-v1 modelv1.gguf --repo "$GITHUB_REPOSITORY" --clobber
+          rm modelv1.gguf
+
+          curl -fL --retry 2 --silent --show-error \
+            'https://huggingface.co/Qwen/Qwen3-8B-GGUF/resolve/main/Qwen3-8B-Q4_K_M.gguf' \
+            | split -b 1900000000 -d -a 2 - modelv2.gguf.part
+          test "$(cat modelv2.gguf.part* | sha256sum | cut -d' ' -f1)" = 'd98cdcbd03e17ce47681435b5150e34c1417f50b5c0019dd560e4882c5745785'
+          gh release upload models-v1 modelv2.gguf.part* --repo "$GITHUB_REPOSITORY" --clobber
+          rm modelv2.gguf.part*
+
+          curl -fL --retry 2 --silent --show-error \
+            'https://huggingface.co/Qwen/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-Q4_K_M.gguf' \
+            | split -b 1900000000 -d -a 2 - modelv3.gguf.part
+          test "$(cat modelv3.gguf.part* | sha256sum | cut -d' ' -f1)" = '7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5'
+          gh release upload models-v1 modelv3.gguf.part* --repo "$GITHUB_REPOSITORY" --clobber
