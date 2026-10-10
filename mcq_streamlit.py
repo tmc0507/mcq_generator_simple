@@ -9,7 +9,6 @@ import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
-from itertools import cycle
 from pathlib import Path
 
 import streamlit as st
@@ -37,17 +36,19 @@ from generate_mcq import (  # noqa: E402
     validate_mcq,
     build_verifier_prompt,
     VERIFY_SCHEMA,
+    allocate_questions,
 )
 
 
 DEFAULT_PROMPT = """/no_think
 Bạn là người ra đề trắc nghiệm. Chỉ dùng thông tin trong SOURCE.
-Hãy viết câu thứ {index} trong tổng {total} câu được yêu cầu; lần gọi này chỉ trả 1 câu mới.
+Hãy viết tối đa {count} câu mới, bắt đầu từ câu thứ {index} trong tổng {total} câu được yêu cầu.
 - Viết bằng tiếng Việt, giữ nguyên thuật ngữ chuyên ngành.
 - Có đúng 4 lựa chọn A/B/C/D và chỉ một đáp án đúng.
 - Đáp án và giải thích phải được SOURCE hỗ trợ.
 - evidence phải trích từ SOURCE; source_type và source_index phải đúng.
-- Nếu SOURCE không đủ thông tin, trả danh sách questions rỗng.
+- Sao chép evidence nguyên văn từ SOURCE; không tự diễn giải dẫn chứng.
+- Nếu SOURCE không đủ thông tin, tạo ít câu hơn hoặc trả danh sách questions rỗng.
 Nguồn hợp lệ: {allowed_sources}
 Các câu đã tạo, không lặp lại: {previous_questions}
 
@@ -79,11 +80,11 @@ def extract(document):
         return json.loads(path.read_text(encoding="utf-8"))
 
 
-def render_prompt(template, chunk, index, total, previous):
+def render_prompt(template, chunk, index, total, previous, count=1):
     values = {
         "index": str(index),
         "total": str(total),
-        "count": "1",
+        "count": str(count),
         "allowed_sources": str(list(zip(chunk["source_types"], chunk["source_indices"]))),
         "previous_questions": " | ".join(q["question"] for q in previous[-8:]) or "Chưa có",
         "source": chunk["text"],
@@ -96,37 +97,57 @@ def render_prompt(template, chunk, index, total, previous):
     return prompt
 
 
-def generate_questions(llm, data, count, template, on_attempt=None, verify=False):
+def generate_questions(llm, data, count, template, on_attempt=None, verify=False, stats=None):
     source_map = {(b["type"], b["index"]): b["text"] for b in data["blocks"]}
-    chunks = [chunk for chunk in data["chunks"] if len(chunk["text"]) >= 200] or data["chunks"]
-    if not chunks:
-        return
+    chunks = data["chunks"]
+    batches = []
+    for chunk, quota in zip(chunks, allocate_questions(chunks, count)):
+        while quota:
+            batch_size = min(3, quota)
+            batches.append((chunk, batch_size))
+            quota -= batch_size
+    stats = stats if stats is not None else {}
+    stats["batches"] = len(batches)
+    stats["generated"] = 0
     accepted = []
-    # ponytail: 4 attempts per requested question prevent endless retries; raise if sources need deeper coverage.
-    for attempt, chunk in zip(range(count * 4 + 5), cycle(chunks)):
+    for attempt, (chunk, batch_size) in enumerate(batches, 1):
         if len(accepted) == count:
             break
         if on_attempt:
-            on_attempt(attempt + 1, len(accepted))
-        prompt = render_prompt(template, chunk, len(accepted) + 1, count, accepted)
+            on_attempt(attempt, len(accepted))
+        prompt = render_prompt(template, chunk, len(accepted) + 1, count, accepted, batch_size)
         try:
             result = ask_json(
                 llm,
                 [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content": prompt}],
                 mcq_schema_for_chunk(chunk),
-                max_tokens=900,
+                max_tokens=max(800, batch_size * 350),
                 temperature=0.3,
             )
-        except (ValueError, KeyError, RuntimeError):
+        except (ValueError, KeyError):
+            stats["generator_error"] = stats.get("generator_error", 0) + 1
             continue
-        for question in result.get("questions", [])[:1]:
+        questions = result.get("questions", [])
+        if not isinstance(questions, list):
+            stats["generator_error"] = stats.get("generator_error", 0) + 1
+            continue
+        stats["generated"] += len(questions)
+        if not questions:
+            stats["empty"] = stats.get("empty", 0) + 1
+        for question in questions[:batch_size]:
             if validate_mcq(question, source_map):
+                stats["structure"] = stats.get("structure", 0) + 1
                 continue
             source_key = (question["source_type"], question["source_index"])
             if source_key not in zip(chunk["source_types"], chunk["source_indices"]):
+                stats["structure"] = stats.get("structure", 0) + 1
                 continue
             if evidence_score(question["evidence"], source_map[source_key]) < 0.75:
+                stats["evidence"] = stats.get("evidence", 0) + 1
+                continue
+            if len(deduplicate(accepted + [question])) == len(accepted):
+                stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
             if verify:
                 try:
@@ -136,28 +157,35 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                          {"role": "user", "content": build_verifier_prompt(question, source_map[source_key])}],
                         VERIFY_SCHEMA, max_tokens=1200, temperature=0,
                     )
-                except (ValueError, RuntimeError):
+                except ValueError:
+                    stats["verifier_error"] = stats.get("verifier_error", 0) + 1
                     continue
                 status = verdict.get("status")
                 if status == "REVISE":
                     revised = verdict.get("corrected_question")
                     if validate_mcq(revised, source_map):
+                        stats["revision"] = stats.get("revision", 0) + 1
                         continue
                     revised_key = (revised["source_type"], revised["source_index"])
                     if revised_key not in zip(chunk["source_types"], chunk["source_indices"]):
+                        stats["revision"] = stats.get("revision", 0) + 1
                         continue
                     if evidence_score(revised["evidence"], source_map[revised_key]) < 0.75:
+                        stats["revision"] = stats.get("revision", 0) + 1
                         continue
                     question = revised
                     source_key = revised_key
                 elif status != "PASS":
+                    stats["verifier_reject"] = stats.get("verifier_reject", 0) + 1
                     continue
                 question["verifier_status"] = status
             question["evidence_score"] = round(evidence_score(question["evidence"], source_map[source_key]), 4)
             if len(deduplicate(accepted + [question])) == len(accepted):
+                stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
             accepted.append(question)
             yield question, prompt
+    stats["accepted"] = len(accepted)
 
 
 def format_question(document, question, prompt):
@@ -212,7 +240,8 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None):
     llm = load_model(model_path)
     questions = []
     results = []
-    for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=True):
+    stats = {}
+    for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=True, stats=stats):
         question["id"] = len(questions) + 1
         question["source"] = {"type": question["source_type"], "index": question["source_index"]}
         questions.append(question)
@@ -221,7 +250,8 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None):
         raise ValueError("Không tạo được câu hỏi có căn cứ; thử tài liệu có nhiều nội dung hơn.")
     exam = {
         "document": document_name, "backend": "llama_cpp", "model": str(model_path),
-        "requested_questions": count, "accepted_questions": len(questions), "questions": questions,
+        "requested_questions": count, "accepted_questions": len(questions),
+        "generation_stats": stats, "questions": questions,
     }
     write_json(EXAM, exam)
     save_results(results)
@@ -330,6 +360,19 @@ def render_exam_message(message):
     exam = message["exam"]
     with st.chat_message("assistant", avatar="🎓"):
         st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải đề TXT hoặc làm bài ngay dưới đây.")
+        if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
+            stats = exam.get("generation_stats", {})
+            st.warning(
+                f"Chỉ giữ {len(exam['questions'])}/{exam['requested_questions']} câu đủ căn cứ "
+                f"sau {stats.get('batches', '?')} nhóm tạo đề. "
+                "Không thêm câu thiếu căn cứ để đủ số lượng."
+            )
+            st.caption(
+                f"Model tạo {stats.get('generated', '?')} câu; loại do cấu trúc: {stats.get('structure', 0)}, "
+                f"dẫn chứng: {stats.get('evidence', 0)}, kiểm tra nội dung: "
+                f"{stats.get('verifier_reject', 0) + stats.get('verifier_error', 0) + stats.get('revision', 0)}, "
+                f"trùng lặp: {stats.get('duplicate', 0)}."
+            )
         st.download_button(
             "⬇ Tải bộ đề TXT", format_exam_txt(exam),
             file_name=f"{Path(exam['document']).stem}_questions.txt", mime="text/plain",
@@ -414,7 +457,7 @@ def chat_view(model_path, template):
                     exam = create_exam(
                         files[0], model_path, count, template,
                         lambda attempt, accepted: progress.write(
-                            f"Lần thử {attempt} · đã xác minh {accepted}/{count} câu"),
+                            f"Đang xử lý nhóm {attempt} · đã giữ {accepted}/{count} câu"),
                     )
                     progress.empty()
             exam_id = uuid.uuid4().hex

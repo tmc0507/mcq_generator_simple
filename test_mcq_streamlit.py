@@ -31,9 +31,14 @@ class FakeModel:
 def test_app():
     data = {"blocks": [{"type": "page", "index": 1, "text": "Dữ kiện gốc."}],
             "chunks": [{"text": "Dữ kiện gốc. " * 20, "source_types": ["page"], "source_indices": [1]}]}
-    questions = list(generate_questions(FakeModel(), data, 3, "Câu {index}/{total}\n{source}"))
-    assert len(questions) == 3
-    assert "Câu 3/3" in questions[2][1]
+    model = FakeModel()
+    progress = []
+    questions = list(generate_questions(model, data, 3, "Câu {index}/{total}; nhóm {count}\n{source}",
+                                        on_attempt=lambda attempt, accepted: progress.append((attempt, accepted))))
+    assert len(questions) == 1
+    assert model.calls == 1
+    assert progress == [(1, 0)]
+    assert "Câu 1/3; nhóm 3" in questions[0][1]
     assert "Dữ kiện gốc." in render_prompt("{source}", data["chunks"][0], 1, 3, [])
     app = AppTest.from_file("mcq_streamlit.py").run(timeout=30)
     assert not app.exception, app.exception
@@ -44,6 +49,54 @@ def test_app():
     app.chat_input[0].set_value("Tạo 3 câu hỏi").run(timeout=30)
     assert not app.exception, app.exception
     assert any("đính kèm tài liệu" in item.value.lower() for item in app.markdown)
+
+
+def test_generation_has_bounded_batches_and_validates_each_question():
+    data = {"blocks": [{"type": "page", "index": 1, "text": "Dữ kiện gốc."}],
+            "chunks": [{"text": "Dữ kiện gốc. " * 20, "source_types": ["page"], "source_indices": [1]}]}
+
+    class BatchModel(FakeModel):
+        def __init__(self):
+            super().__init__()
+            self.verifier_calls = 0
+
+        def generate_text(self, messages, **kwargs):
+            if "verifier" in messages[0]["content"]:
+                self.verifier_calls += 1
+                return json.dumps({"status": "PASS", "issues": [], "corrected_question": None})
+            self.calls += 1
+            questions = [{"question": f"Câu hỏi {index + 1}?",
+                          "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
+                          "correct_answer": "A", "concept": "ví dụ", "difficulty": "easy",
+                          "explanation": "Dữ kiện gốc.", "evidence": "Dữ kiện gốc.",
+                          "source_type": "page", "source_index": 1} for index in range(3)]
+            return json.dumps({"questions": questions})
+
+    model = BatchModel()
+    stats = {}
+    questions = list(generate_questions(model, data, 3, mcq_streamlit.DEFAULT_PROMPT,
+                                        verify=True, stats=stats))
+    assert len(questions) == 3
+    assert stats["batches"] == 1
+    assert stats["accepted"] == 3
+    assert model.calls == 1
+    assert model.verifier_calls == 3
+
+    class DuplicateModel(BatchModel):
+        def generate_text(self, messages, **kwargs):
+            result = super().generate_text(messages, **kwargs)
+            if "verifier" in messages[0]["content"]:
+                return result
+            parsed = json.loads(result)
+            parsed["questions"] = [parsed["questions"][0]] * 3
+            return json.dumps(parsed)
+
+    duplicate_model = DuplicateModel()
+    duplicate_stats = {}
+    assert len(list(generate_questions(duplicate_model, data, 3, mcq_streamlit.DEFAULT_PROMPT,
+                                       verify=True, stats=duplicate_stats))) == 1
+    assert duplicate_model.verifier_calls == 1
+    assert duplicate_stats["duplicate"] == 2
 
 
 def test_exam_file_and_count():

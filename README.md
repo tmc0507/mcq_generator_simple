@@ -131,6 +131,7 @@ streamlit run mcq_streamlit.py
 Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
 1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Mỗi câu vẫn qua kiểm tra cấu trúc, evidence và semantic verifier.
+   Giao diện tạo tối đa 3 câu mỗi nhóm, phân bổ số câu theo độ dài chunk và dừng sau số nhóm đã phân bổ. Nếu model chỉ tạo được ít câu có căn cứ hơn yêu cầu, đề vẫn được lưu với số câu thực tế và lý do loại câu được hiển thị trong chat. Trên CPU, `modelv2` 8B vẫn có thể mất nhiều phút vì verifier phải đọc từng câu.
 2. Khi đề hiện trong chat, bấm **Tải bộ đề TXT** để lưu bản chỉ gồm câu hỏi và lựa chọn. Đề JSON lưu ở `output/questions.json`, bản TXT ở `output/questions.txt`.
 3. Sinh viên nhập tên/mã, chọn đáp án và **Nộp bài** ngay trong thẻ đề. Kết quả lưu ở `output/attempts.json`.
 4. Nhập câu hỏi tiếp trong cùng ô chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Chatbot dùng kết quả bài vừa nộp; nhận xét từ một bài kiểm tra không phải đánh giá năng lực toàn diện.
