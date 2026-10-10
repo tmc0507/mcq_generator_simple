@@ -1,260 +1,74 @@
-# Trợ lý tạo đề và nhận xét bài làm
+# MCQ Studio
 
-Một pipeline xử lý tài liệu và kiểm chứng MCQ, với hai backend inference:
+Ứng dụng tạo bộ đề trắc nghiệm từ tài liệu và nhận xét bài làm sinh viên. Giao diện chạy bằng Streamlit; phần trích xuất tài liệu dùng C++, phần tạo câu hỏi và nhận xét dùng model local.
 
-```text
-PDF / PPTX / DOCX / CSV / DOC / PPT
-        ↓
-C++ extract text
-        ↓
-C++ chia chunk
-        ↓
-Qwen3-1.7B/8B GGUF local hoặc Qwen3-8B Transformers 4-bit trên Kaggle
-        ↓
-Python (model chỉ load 1 lần cho generator và verifier)
-        ↓
-MCQ JSON
-        ↓
-Evidence check
-        ↓
-Qwen verifier
-        ↓
-Deduplicate
-        ↓
-output/questions.json
-```
+## Cấu trúc workspace
 
-CLI không có REST API, database, RAG hay fine-tune. Giao diện Streamlit chạy local và lưu đề/bài làm trong `output/`.
+    input/
+      documents/          Tài liệu PDF, DOC/DOCX, PPT/PPTX, CSV
+      student_results/    Mỗi bài làm sinh viên là một file JSON
+    output/
+      questions.json      Bộ đề mới nhất
+    models/
+      modelv3.gguf        Model mặc định (4B)
+      modelv2.gguf        Model lớn hơn (8B)
 
-## LOCAL MODE — GGUF + llama-cpp-python
+Ứng dụng tự tạo các thư mục cần thiết. File model, tài liệu mới tải lên, kết quả sinh viên và output không được đưa lên GitHub; hai tài liệu mẫu trong input/documents/ được giữ để thử chức năng. Các file tạm của CMake và quá trình chia tài liệu nằm trong build/ và work/.
 
-### Dependencies Ubuntu
+## Chạy trên máy local
 
-```bash
-sudo apt update
-sudo apt install -y build-essential cmake poppler-utils unzip libreoffice-writer libreoffice-impress python3-venv python3-pip
-```
+Cần Python 3, CMake, trình biên dịch C++, Poppler và unzip. Với file DOC/PPT cũ, cài thêm LibreOffice.
 
-`pdftotext` từ `poppler-utils` được dùng để đọc PDF. `unzip` được dùng để đọc XML bên trong PPTX/DOCX.
-`.doc` cần LibreOffice Writer và `.ppt` cần LibreOffice Impress để chuyển tạm sang định dạng mới trước khi trích text. CSV dùng dòng đầu làm tên cột và giữ số dòng làm nguồn dẫn chứng.
+    sudo apt install build-essential cmake poppler-utils unzip python3-venv
+    python3 -m venv .venv
+    source .venv/bin/activate
+    pip install -r scripts/requirements.txt
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+    cmake --build build -j
+    streamlit run mcq_streamlit.py
 
-### Build C++ document processor
+Đặt ít nhất models/modelv3.gguf hoặc models/modelv2.gguf vào workspace trước khi tạo đề. Giao diện mặc định chọn modelv3 khi có file. Model không nằm trong repository.
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
+## Tạo đề và nhận xét
 
-Test riêng phần đọc/chunk tài liệu:
+1. Trong chat, bấm dấu +, chọn tài liệu và nhập “Tạo 10 câu hỏi”. File tải lên được giữ trong input/documents/.
+2. Sau khi tạo, toàn bộ JSON bộ đề xuất hiện ngay trong chat. App đồng thời ghi output/questions.json và có nút tải JSON.
+3. Trang web làm bài ghi mỗi kết quả thành một file .json trong input/student_results/. Cũng có thể đính kèm file JSON bằng dấu +; app sẽ lưu bản đó vào cùng thư mục.
+4. Hỏi “Nhận xét SV001” hoặc “Nhận xét buổi kiểm tra hôm nay”. App chấm theo bộ đề đang mở, lấy bản nộp mới nhất của mỗi sinh viên và chỉ tính file được ghi trong ngày khi hỏi về “hôm nay”.
 
-```bash
-./build/doc_processor \
-  "input/Slides CHAPTER - SVM.pdf" \
-  --output work/chunks.json \
-  --blocks-per-chunk 3 \
-  --chunk-chars 12000
-```
+Form kết quả:
 
-Kết quả trung gian nằm ở:
+    {
+      "exam_id": "lay_tu_output_questions_json",
+      "student": "SV001 - Nguyễn Văn An",
+      "answers": {"1": "A", "2": "C", "3": ""}
+    }
 
-```text
-work/chunks.json
-```
+Khóa trong answers là ID câu hỏi; giá trị là A/B/C/D hoặc chuỗi rỗng. exam_id phải khớp bộ đề đang mở. Xem form trong examples/student_result.template.json và cặp đề/bài làm mẫu trong examples/world_model/.
 
-### Cài llama-cpp-python
+Chế độ tạo nhanh giữ câu hỏi model sinh ra, chỉ loại câu trùng nguyên văn. Giảng viên cần rà soát đáp án trước khi giao đề. Có thể bật “Kiểm tra đáp án bằng AI” nếu cần kiểm tra sâu hơn.
 
-Khuyến nghị tạo virtual environment:
+## Chạy theo lệnh
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-```
+    ./run.sh "input/documents/Slides CHAPTER - SVM.pdf" "models/modelv3.gguf" 10
 
-#### CPU only
+Lệnh này build bộ đọc tài liệu, ghi work/chunks.json và tạo output/questions.json. Bộ đề tạo bằng lệnh cũng có exam_id để ghép với kết quả sinh viên.
 
-```bash
-pip install -r scripts/requirements.txt
-```
+## Chạy trên Kaggle
 
-#### NVIDIA CUDA
+Bật GPU, tải workspace lên Kaggle, cài dependency và truyền đường dẫn model Transformers đã gắn vào notebook:
 
-Nếu muốn build `llama-cpp-python` có CUDA:
+    bash kaggle/setup.sh
+    ./kaggle/run_kaggle.sh "input/documents/World(1)(3).docx" /kaggle/input/my-model 10
 
-```bash
-CMAKE_ARGS="-DGGML_CUDA=on" pip install --upgrade --force-reinstall llama-cpp-python
-```
+Backend Kaggle dùng Transformers 4-bit; backend local dùng GGUF. Hai chế độ dùng chung prompt, schema, kiểm tra và định dạng đầu ra. Không cần mang file GGUF lên Kaggle.
 
-Nếu máy thiếu dependency build hoặc CUDA compiler không tương thích, hãy thử CPU trước để xác nhận pipeline chạy đúng.
+## Kiểm thử
 
-### Model nhẹ cho giao diện
+    python3 -m py_compile mcq_streamlit.py scripts/generate_mcq.py
+    python3 test_generate_mcq.py
+    python3 test_mcq_streamlit.py
 
-Giao diện ưu tiên `modelv3` (Qwen3-4B) khi có file; nếu thiếu thì dùng `modelv1` (Qwen3-1.7B). Ba file GGUF nằm trong thư mục `models/` theo tên:
+Bộ đọc tài liệu có thể kiểm tra riêng bằng:
 
-| Tên file | Model gốc | Vai trò |
-| --- | --- | --- |
-| `modelv1.gguf` | Qwen3-1.7B Q4_K_M | Nhanh nhất nhưng dễ lặp câu |
-| `modelv2.gguf` | Qwen3-8B Q4_K_M | Chất lượng cao hơn, rất chậm trên CPU |
-| `modelv3.gguf` | Qwen3-4B Q4_K_M | Mặc định khi có file, cân bằng tốc độ và chất lượng |
-
-Sau khi clone code từ GitHub, tải các file GGUF từ [thư mục Google Drive của project](https://drive.google.com/drive/folders/1aeogV0naaJXpfwNbGDlzKCgCKVbc8d8P?usp=drive_link), rồi đặt vào `models/` theo đúng tên trong bảng trên. Tạo thư mục nếu chưa có:
-
-```bash
-mkdir -p models
-```
-
-GGUF không nằm trong GitHub repository. Chỉ cần `modelv1.gguf` là chạy được; khi thêm `modelv3.gguf`, giao diện sẽ chọn modelv3 mặc định. Có thể bổ sung `modelv2.gguf` nếu máy đủ mạnh.
-
-Cũng có thể tải trực tiếp từ Hugging Face. Các model gốc được phát hành theo giấy phép [Apache 2.0](https://huggingface.co/Qwen/Qwen3-8B-GGUF/blob/main/LICENSE): [1.7B](https://huggingface.co/ggml-org/Qwen3-1.7B-GGUF), [4B](https://huggingface.co/Qwen/Qwen3-4B-GGUF), [8B](https://huggingface.co/Qwen/Qwen3-8B-GGUF).
-
-```bash
-pip install -U huggingface_hub
-hf download ggml-org/Qwen3-1.7B-GGUF Qwen3-1.7B-Q4_K_M.gguf --local-dir models
-mv models/Qwen3-1.7B-Q4_K_M.gguf models/modelv1.gguf
-```
-
-Trên chunk SVM mẫu, modelv1 tạo một câu trong khoảng 23 giây sau khi load trên máy CPU thử nghiệm; thời gian và chất lượng có thể khác theo tài liệu.
-
-### Model 8B cho CLI
-
-Dùng file:
-
-```text
-Qwen3-8B-Q4_K_M.gguf
-```
-
-Đặt tại:
-
-```text
-models/modelv2.gguf
-```
-
-Có thể tải bằng Hugging Face CLI:
-
-```bash
-pip install -U huggingface_hub
-hf download Qwen/Qwen3-8B-GGUF Qwen3-8B-Q4_K_M.gguf \
-  --local-dir models
-mv models/Qwen3-8B-Q4_K_M.gguf models/modelv2.gguf
-```
-
-Bản 4B dùng lệnh `hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models`, sau đó đổi tên thành `models/modelv3.gguf`.
-
-Model khoảng 5 GB.
-
-### Giao diện Streamlit
-
-```bash
-streamlit run mcq_streamlit.py
-```
-
-Mọi thao tác nằm trong **một cuộc trò chuyện**:
-
-1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Chế độ mặc định tạo từng nhóm tối đa 3 câu: giữ câu model trả về, chỉ bỏ câu hỏi trùng nguyên văn; không kiểm tra dẫn chứng và không gọi verifier AI. Từng câu được ghi ngay vào `output/questions.json`, nên có thể giữ phần đã tạo nếu dừng.
-2. Bấm **Tải dữ liệu đề JSON** để chuyển bộ đề sang trang web làm bài. File chứa `exam_id`, câu hỏi, lựa chọn và đáp án; bản TXT chỉ chứa câu hỏi và lựa chọn. Số câu thực tế có thể ít hơn hoặc nhiều hơn số yêu cầu nếu model trả thiếu hoặc sinh dư trong một nhóm.
-3. Trang web khác thu đáp án của sinh viên và ghi **mỗi bài làm thành một file JSON** trong `output/student_results/` theo mẫu dưới đây. App tự đọc thư mục khi giảng viên hỏi trong chat. Vẫn có thể đính kèm JSON bằng dấu **+**; cách này lưu kết quả vào `output/attempts.json`.
-4. Hỏi `Nhận xét sinh viên SV001` hoặc `Nhận xét sinh viên Nguyễn Văn An` để xem bài nộp mới nhất của người đó. Hỏi `Nhận xét buổi kiểm tra hôm nay` để xem tất cả sinh viên có file được ghi trong ngày hiện tại, tính từ file đầu tiên đến lúc hỏi. App chấm theo bộ đề đang mở và dùng một lượt model cho gợi ý ôn tập chung của cả lớp.
-
-```json
-{
-  "exam_id": "gia-tri-exam_id-trong-questions.json",
-  "student": "SV001",
-  "answers": {"1": "A", "2": "C", "3": ""}
-}
-```
-
-`answers` dùng ID câu hỏi làm khóa; giá trị là `A`, `B`, `C`, `D` hoặc chuỗi rỗng nếu bỏ trống. App từ chối file có `exam_id` không khớp hoặc đáp án không hợp lệ. Giao diện này không có bước sinh viên làm bài.
-
-Tạo thư mục bằng `mkdir -p output/student_results`, rồi để web ghi file như `output/student_results/SV001.json`. Thời điểm nhận là thời điểm file được ghi trên máy chạy app; khi có nhiều file cho cùng một sinh viên và bộ đề, app lấy file mới nhất. Truy vấn “hôm nay” dùng ngày giờ địa phương của máy; file sai form hoặc thuộc bộ đề khác được bỏ qua. Thư mục `output/` đã nằm trong `.gitignore`, nên dữ liệu bài làm không được đưa lên GitHub.
-
-Xem [form trống](examples/student_result.template.json), [bài làm ví dụ](examples/student_result.example.json) và [nhận xét modelv1](examples/feedback.example.md). Bài làm ví dụ khớp với [đề ví dụ](examples/demo_exam.json): sinh viên đúng câu 1 và 4, sai câu 2, bỏ trống câu 3, nên được 2/4. Web làm bài cần lấy `exam_id` và các `id` câu hỏi từ file `questions.json` vừa tải, rồi xuất JSON UTF-8 theo đúng form này; không cần gửi đáp án đúng hay điểm số. Nếu sinh viên bỏ trống một câu, dùng chuỗi rỗng hoặc bỏ khóa câu đó trong `answers`. Trong giao diện thật, chỉ nhận xét được kết quả có `exam_id` trùng với bộ đề đang mở. Số liệu và danh sách câu chưa đúng được app chấm trực tiếp; model chỉ gợi ý ôn tập.
-
-[Ví dụ World Model 10 câu](examples/world_model/questions.json) dùng chính bộ đề xuất từ `World(1)(3).docx`. [Bài làm mẫu](examples/world_model/student_result.json) đúng 5/10; [nhận xét từ modelv3](examples/world_model/feedback.md) cho thấy cách app trả lời. Sao chép bài làm mẫu vào `output/student_results/SV005.json` khi bộ đề đang mở có cùng `exam_id`, rồi hỏi `Nhận xét SV005` để thử luồng tự đọc thư mục.
-
-Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B), `modelv2` (GGUF 8B) và `modelv3` (GGUF 4B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
-
-Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B` và giữ cả câu thiếu trường. Nếu câu thiếu đáp án hoặc lựa chọn, cần sửa trước khi chấm kết quả; app sẽ báo lỗi thay vì chấm sai. Chế độ nhanh chỉ loại câu hỏi giống hệt sau chuẩn hóa chữ; những câu diễn đạt khác nhưng cùng ý vẫn có thể trùng. Giảng viên cần rà soát bản nháp trước khi giao bài. Bật **Kiểm tra đáp án bằng AI** nếu muốn dùng lại quy trình kiểm tra chặt hơn. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
-
-Model được cache để tạo đề và chat dùng cùng một bản trong RAM. Chế độ nhanh chỉ yêu cầu model sinh câu hỏi, lựa chọn, đáp án và chủ đề; dẫn chứng là tùy chọn. App tự dùng tối đa 20 lớp GPU khi `llama-cpp-python` báo hỗ trợ CUDA, còn lại chạy CPU. Nếu `nvidia-smi` báo `Driver/library version mismatch`, cần khởi động lại máy sau khi cập nhật driver; trước đó modelv2/modelv3 vẫn chạy trên CPU và có thể chậm.
-
-### Chạy toàn pipeline
-
-```bash
-./run.sh \
-  "input/Slides CHAPTER - SVM.pdf" \
-  "models/modelv2.gguf" \
-  20
-```
-
-Hoặc chạy từng bước:
-
-```bash
-./build/doc_processor \
-  "input/Slides CHAPTER - SVM.pdf" \
-  --output work/chunks.json
-
-python3 scripts/generate_mcq.py \
-  --backend llama_cpp \
-  --chunks work/chunks.json \
-  --model models/modelv2.gguf \
-  --questions 20 \
-  --n-ctx 8192 \
-  --n-gpu-layers 20 \
-  --output output/questions.json
-```
-
-Nếu CUDA/VRAM không ổn, thử:
-
-```bash
---n-gpu-layers 0
-```
-
-để chạy CPU, hoặc giảm từ `20` xuống `10`.
-
-`--backend` mặc định là `llama_cpp`, nên command local cũ vẫn chạy. Có thể truyền đối số thứ tư `llama_cpp` hoặc `transformers` vào `run.sh`.
-
-## KAGGLE MODE — Transformers + Qwen3-8B 4-bit
-
-Bật GPU trong Kaggle Settings. Backend dùng GPU 0, NF4, và cùng prompt, schema, evidence checker, verifier, dedup với local. `kaggle/setup.sh` chỉ cài các dependency còn thiếu hoặc chưa đủ phiên bản; không cài `llama-cpp-python`.
-
-### Upload workspace to Kaggle
-
-Từ thư mục **cha** của project, tạo zip không chứa model GGUF và file sinh ra:
-
-```bash
-zip -r mcq_generator_simple.zip mcq_generator_simple \
-  -x 'mcq_generator_simple/.venv/*' 'mcq_generator_simple/build/*' \
-     'mcq_generator_simple/models/*' 'mcq_generator_simple/work/*' \
-     'mcq_generator_simple/output/*' 'mcq_generator_simple/debug/*' \
-     'mcq_generator_simple/.git/*' 'mcq_generator_simple/.aws/*' \
-     'mcq_generator_simple/.codex/*' 'mcq_generator_simple/.agents/*' \
-     '*/__pycache__/*' '*.pyc'
-```
-
-Upload zip dưới dạng Kaggle Dataset, rồi trong notebook giải nén vào vùng ghi được:
-
-```bash
-unzip /kaggle/input/<dataset-name>/mcq_generator_simple.zip -d /kaggle/working
-cd /kaggle/working/mcq_generator_simple
-bash kaggle/setup.sh
-./kaggle/run_kaggle.sh "input/Slides CHAPTER - SVM.pdf" Qwen/Qwen3-8B 10
-```
-
-Nếu Kaggle Internet tắt, gắn model vào notebook và truyền thư mục local thay cho model ID, ví dụ `./kaggle/run_kaggle.sh input/file.pdf /kaggle/input/qwen3-model/Qwen3-8B 10`. Dependency cũng cần có sẵn hoặc được cung cấp qua wheel dataset. Có thể chạy riêng phần AI sau khi tạo `work/chunks.json`:
-
-```bash
-python3 scripts/generate_mcq.py \
-  --backend transformers --chunks work/chunks.json \
-  --model Qwen/Qwen3-8B --questions 2 --limit-chunks 1 \
-  --output output/test.json
-```
-
-`--questions` là tổng số câu cho toàn tài liệu. Chunk quá ngắn không được cấp quota; thiếu câu có căn cứ thì output ít hơn. `--max-input-tokens` giới hạn prompt Transformers (mặc định 8192); `--max-new-tokens` giới hạn output (mặc định 4096). `--device-map auto` là tùy chọn, mặc định chỉ dùng GPU 0. `--skip-verifier` chỉ dành cho debug, còn `--debug` lưu prompt/raw/JSON vào `debug/`.
-
-## Output và kiểm chứng
-
-Cả hai backend ghi `output/questions.json` với `document`, `backend`, `model`, số câu yêu cầu/được giữ, và `questions`. Giao diện Streamlit thêm `exam_id` để ghép đúng file kết quả trả về. Mỗi câu có `id`, `question`, bốn `choices`, `correct_answer`, `concept`, `difficulty`, `explanation`, `evidence`, `source` (`type` và `index`), `evidence_score`, `verifier_status`. Hai field cũ `source_type` và `source_index` vẫn được giữ để tương thích local.
-
-Evidence checker chỉ kiểm tra đoạn trích có trong tài liệu; cùng model đang load sẽ kiểm tra nghĩa và đáp án. Sau `REVISE`, code kiểm tra lại cấu trúc và evidence. Qwen3 dùng `/no_think` trong prompt local và `enable_thinking=False` trong chat template Transformers; parser loại `<think>` nếu model vẫn xuất ra.
-
-Hỗ trợ `.pdf`, `.pptx`, `.docx`, `.csv`, `.ppt`, `.doc`. Chưa có OCR cho PDF scan hay đọc ảnh trong slide. Có thể đổi `--model` thành đường dẫn model khác mà không sửa pipeline.
+    ./build/doc_processor "input/documents/Slides CHAPTER - SVM.pdf" --output work/chunks.json

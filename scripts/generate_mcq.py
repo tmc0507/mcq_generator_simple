@@ -5,6 +5,7 @@ import os
 import random
 import re
 import unicodedata
+import uuid
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -337,11 +338,11 @@ class TransformersBackend:
             )
         except Exception as exc:
             if "out of memory" in str(exc).lower():
-                raise RuntimeError("CUDA out of memory while loading Qwen; use a GPU with more VRAM.") from exc
+                raise RuntimeError("CUDA out of memory while loading the model; use a GPU with more VRAM.") from exc
             raise RuntimeError(
                 f"Cannot load model {model_name}: {exc}. "
                 "It may be unavailable locally while Kaggle Internet is disabled; "
-                "enable Internet or pass --model /kaggle/input/.../Qwen3-8B."
+                "enable Internet or pass --model /kaggle/input/.../model-directory."
             ) from exc
         self.model.eval()
         self.torch = torch
@@ -655,9 +656,10 @@ def main():
         q["source"] = {"type": q["source_type"], "index": q["source_index"]}
 
     output = {
+        "exam_id": uuid.uuid4().hex,
         "document": data.get("document", chunks_path.name),
         "backend": args.backend,
-        "model": args.model,
+        "model": Path(args.model).name if args.backend == "llama_cpp" else args.model,
         "requested_questions": args.questions,
         "generated_questions": generated_count,
         "accepted_before_dedup": before_dedup,

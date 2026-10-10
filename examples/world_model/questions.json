@@ -2,7 +2,7 @@
   "exam_id": "613d20b962fc43af90b07e2e3cf026af",
   "document": "World(1)(3).docx",
   "backend": "llama_cpp",
-  "model": "models/modelv3.gguf",
+  "model": "modelv3.gguf",
   "requested_questions": 10,
   "accepted_questions": 10,
   "generation_stats": {

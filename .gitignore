@@ -1,6 +1,9 @@
 build/
 .venv/
 models/
+input/documents/*
+input/student_results/*
+!input/student_results/.gitkeep
 work/
 output/
 debug/

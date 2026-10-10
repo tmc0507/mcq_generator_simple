@@ -97,7 +97,7 @@ def test_cli_shared_pipeline():
         }), encoding="utf-8")
         model = root / "model.gguf"
         model.touch()
-        for backend_name, model_name in (("llama_cpp", str(model)), ("transformers", "Qwen/Qwen3-8B")):
+        for backend_name, model_name in (("llama_cpp", str(model)), ("transformers", "example/model")):
             output = root / f"{backend_name}.json"
             args = ["generate_mcq.py", "--backend", backend_name, "--chunks", str(chunks),
                     "--model", model_name, "--questions", "1", "--output", str(output)]
@@ -110,6 +110,8 @@ def test_cli_shared_pipeline():
             assert len(FakeBackend.instances) == 1
             assert [call["do_sample"] for call in FakeBackend.instances[0].calls] == [True, False]
             assert result["backend"] == backend_name
+            assert len(result["exam_id"]) == 32
+            assert result["model"] == ("model.gguf" if backend_name == "llama_cpp" else "example/model")
             assert result["requested_questions"] == result["accepted_questions"] == 1
             assert result["questions"][0]["source"] == {"type": "page", "index": 1}
             assert result["questions"][0]["verifier_status"] == "PASS"
@@ -124,7 +126,7 @@ def test_cli_shared_pipeline():
 
         output = root / "revised.json"
         args = ["generate_mcq.py", "--backend", "transformers", "--chunks", str(chunks),
-                "--model", "Qwen/Qwen3-8B", "--questions", "1", "--output", str(output)]
+                "--model", "example/model", "--questions", "1", "--output", str(output)]
         with patch.object(pipeline, "TransformersBackend", BadRevisionBackend), patch.object(sys, "argv", args):
             pipeline.main()
         result = json.loads(output.read_text(encoding="utf-8"))
@@ -197,7 +199,7 @@ def test_transformers_adapter_without_gpu_download():
         from_pretrained=lambda name, **kwargs: model,
     )
     with patch.dict(sys.modules, {"torch": fake_torch, "numpy": fake_numpy, "transformers": fake_transformers}):
-        backend = pipeline.TransformersBackend("Qwen/Qwen3-8B", max_input_tokens=300)
+        backend = pipeline.TransformersBackend("example/model", max_input_tokens=300)
         messages = [{"role": "system", "content": "JSON only"},
                     {"role": "user", "content": "Question\nSOURCE:\n" + "word " * 600}]
         assert backend.generate_text(messages, 120, 0.4, True) == '{"ok": true}'

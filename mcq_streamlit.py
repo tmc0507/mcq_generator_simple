@@ -1,7 +1,6 @@
 """Generate grounded MCQs from local documents with an editable prompt."""
 
 import json
-import fcntl
 from io import BytesIO
 import os
 import re
@@ -18,18 +17,14 @@ import streamlit as st
 
 
 SOURCE = Path(__file__).resolve().parent
-SMALL_MODEL = SOURCE / "models/modelv1.gguf"
 LARGE_MODEL = SOURCE / "models/modelv2.gguf"
 MEDIUM_MODEL = SOURCE / "models/modelv3.gguf"
-MODEL = next((path for path in (MEDIUM_MODEL, SMALL_MODEL, LARGE_MODEL) if path.is_file()), SMALL_MODEL)
-INPUT = SOURCE / "input"
-OUTPUT = SOURCE / "output/mcq_questions.txt"
+MODEL = next((path for path in (MEDIUM_MODEL, LARGE_MODEL) if path.is_file()), MEDIUM_MODEL)
+DOCUMENTS_INBOX = SOURCE / "input/documents"
 EXAM = SOURCE / "output/questions.json"
-EXAM_TXT = SOURCE / "output/questions.txt"
-ATTEMPTS = SOURCE / "output/attempts.json"
-RESULTS_INBOX = SOURCE / "output/student_results"
+RESULTS_INBOX = SOURCE / "input/student_results"
 DOCUMENT_TYPES = {".pdf", ".docx", ".pptx", ".csv", ".doc", ".ppt"}
-MODEL_OPTIONS = {"modelv1": SMALL_MODEL, "modelv2": LARGE_MODEL, "modelv3": MEDIUM_MODEL}
+MODEL_OPTIONS = {"modelv2": LARGE_MODEL, "modelv3": MEDIUM_MODEL}
 sys.path.insert(0, str(SOURCE / "scripts"))
 
 from generate_mcq import (  # noqa: E402
@@ -235,28 +230,6 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
     stats["accepted"] = len(accepted)
 
 
-def format_question(document, question, prompt):
-    choices = question["choices"]
-    return "\n".join([
-        f"TÀI LIỆU: {document}",
-        "PROMPT ĐÃ GỬI MODEL:",
-        f"[system] {SYSTEM_PROMPT}",
-        "[user]", prompt,
-        "",
-        f"Câu hỏi: {question['question']}",
-        *(f"{key}. {choices[key]}" for key in "ABCD"),
-        f"Đáp án: {question['correct_answer']}",
-        f"Giải thích: {question['explanation']}",
-        f"Dẫn chứng: {question['evidence']}",
-        f"Nguồn: {question['source_type']} {question['source_index']}",
-    ])
-
-
-def save_results(results):
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    OUTPUT.write_text("\n\n".join(results) + "\n", encoding="utf-8")
-
-
 def question_count(prompt):
     match = re.search(r"(?<!\d)(\d+)\s*(?:câu(?: hỏi)?|questions?)\b", prompt, re.IGNORECASE)
     count = int(match.group(1)) if match else 10
@@ -265,43 +238,38 @@ def question_count(prompt):
     return count
 
 
-def format_exam_txt(exam):
-    lines = [f"BỘ ĐỀ: {exam['document']}", f"Số câu: {len(exam['questions'])}", ""]
-    if exam.get("verification_enabled") is False:
-        lines.insert(1, "BẢN NHÁP: Chưa kiểm tra đáp án, dẫn chứng hoặc câu trùng; giảng viên cần rà soát.")
-    for position, question in enumerate(exam["questions"], 1):
-        lines.append(f"Câu {position}. {question['question']}")
-        lines.extend(f"{letter}. {question['choices'][letter]}" for letter in "ABCD")
-        lines.append("")
-    return "\n".join(lines).rstrip() + "\n"
-
-
 def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=False, on_question=None):
     if not Path(model_path).is_file():
         raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
     document_name = Path(uploaded.name).name
     if Path(document_name).suffix.lower() not in DOCUMENT_TYPES:
         raise ValueError("Chỉ hỗ trợ PDF, DOC/DOCX, PPT/PPTX và CSV.")
-    with tempfile.TemporaryDirectory() as directory:
-        document = Path(directory) / document_name
-        document.write_bytes(uploaded.getvalue())
-        data = extract(document)
+    DOCUMENTS_INBOX.mkdir(parents=True, exist_ok=True)
+    document = DOCUMENTS_INBOX / document_name
+    content = uploaded.getvalue()
+    if document.exists() and (not document.is_file() or document.read_bytes() != content):
+        stem = Path(document_name).stem
+        suffix = Path(document_name).suffix
+        serial = 2
+        while document.exists():
+            document = DOCUMENTS_INBOX / f"{stem}_{serial}{suffix}"
+            serial += 1
+    if not document.exists():
+        document.write_bytes(content)
+    data = extract(document)
     llm = load_model(model_path)
     questions = []
-    results = []
     stats = {}
     exam = {
         "exam_id": uuid.uuid4().hex,
-        "document": document_name, "backend": "llama_cpp", "model": str(model_path),
+        "document": document_name, "backend": "llama_cpp", "model": Path(model_path).name,
         "requested_questions": count, "accepted_questions": 0,
         "generation_stats": stats, "verification_enabled": verify, "questions": questions,
     }
-    write_json(EXAM, exam)
-    for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=verify, stats=stats):
+    for question, _ in generate_questions(llm, data, count, template, on_attempt, verify=verify, stats=stats):
         question["id"] = len(questions) + 1
         question["source"] = {"type": question["source_type"], "index": question["source_index"]}
         questions.append(question)
-        results.append(format_question(document_name, question, prompt))
         exam["accepted_questions"] = len(questions)
         write_json(EXAM, exam)
         if on_question:
@@ -309,9 +277,6 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=F
     if not questions:
         raise ValueError("Model chưa trả về câu hỏi nào; thử tài liệu có nhiều nội dung hơn.")
     write_json(EXAM, exam)
-    save_results(results)
-    EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
-    EXAM_TXT.write_text(format_exam_txt(exam), encoding="utf-8")
     return exam
 
 
@@ -396,24 +361,6 @@ def import_result(uploaded, exam):
         "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "document": exam["document"], "report": score_attempt(exam["questions"], answers),
     }
-
-
-def read_attempts():
-    if not ATTEMPTS.is_file():
-        return []
-    attempts = json.loads(ATTEMPTS.read_text(encoding="utf-8"))
-    if not isinstance(attempts, list):
-        raise ValueError("output/attempts.json không hợp lệ")
-    return attempts
-
-
-def save_attempt(attempt):
-    ATTEMPTS.parent.mkdir(parents=True, exist_ok=True)
-    with (ATTEMPTS.parent / ".attempts.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        attempts = read_attempts()
-        attempts.append(attempt)
-        write_json(ATTEMPTS, attempts)
 
 
 def search_key(value):
@@ -515,7 +462,7 @@ def class_reply(llm, question, records, skipped=0):
 def render_exam_message(message):
     exam = message["exam"]
     with st.chat_message("assistant", avatar="🎓"):
-        st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải JSON để đưa sang trang web làm bài.")
+        st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. JSON đã lưu tại `output/questions.json`.")
         if exam.get("verification_enabled") is False:
             st.info("Bản nháp nhanh: giữ nguyên dẫn chứng, bỏ câu hỏi trùng nguyên văn; chưa kiểm tra đáp án. Giảng viên nên rà soát trước khi giao bài.")
         if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
@@ -538,20 +485,17 @@ def render_exam_message(message):
                     f"{stats.get('verifier_reject', 0) + stats.get('verifier_error', 0) + stats.get('revision', 0)}, "
                     f"trùng lặp: {stats.get('duplicate', 0)}."
                 )
+        exam_json = json.dumps(exam, ensure_ascii=False, indent=2)
+        st.code(exam_json, language="json")
         st.download_button(
-            "⬇ Tải dữ liệu đề JSON", json.dumps(exam, ensure_ascii=False, indent=2),
+            "⬇ Tải dữ liệu đề JSON", exam_json,
             file_name=f"{Path(exam['document']).stem}_questions.json", mime="application/json",
             key="download_json_" + message["id"],
-        )
-        st.download_button(
-            "⬇ Tải bộ đề TXT", format_exam_txt(exam),
-            file_name=f"{Path(exam['document']).stem}_questions.txt", mime="text/plain",
-            key="download_txt_" + message["id"],
         )
 
 
 def chat_view(model_path, template, verify=False):
-    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu để tạo đề; đặt file kết quả vào output/student_results rồi hỏi nhận xét.</p></div>', unsafe_allow_html=True)
+    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu để tạo đề; đặt file kết quả vào input/student_results rồi hỏi nhận xét.</p></div>', unsafe_allow_html=True)
     messages = st.session_state.setdefault("messages", [])
     stopped = st.session_state.pop("generating_exam", False)
     partial = st.session_state.pop("partial_exam", None)
@@ -559,8 +503,6 @@ def chat_view(model_path, template, verify=False):
         partial["generation_stats"]["accepted"] = len(partial["questions"])
         partial["stopped"] = True
         write_json(EXAM, partial)
-        EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
-        EXAM_TXT.write_text(format_exam_txt(partial), encoding="utf-8")
         messages.append({"role": "assistant", "content":
                          f"Đã dừng tạo đề. Giữ lại {len(partial['questions'])} câu đã tạo."})
         exam_id = uuid.uuid4().hex
@@ -569,7 +511,7 @@ def chat_view(model_path, template, verify=False):
         messages.append({"role": "assistant", "content": "Đã dừng tạo đề trước khi có câu hỏi hợp lệ."})
     if not messages:
         with st.chat_message("assistant", avatar="🎓"):
-            st.write("Xin chào! Bấm **+** để chọn tài liệu và tạo đề JSON. Đặt kết quả từ trang làm bài vào `output/student_results/`, rồi hỏi nhận xét theo tên, mã sinh viên hoặc buổi kiểm tra hôm nay.")
+            st.write("Xin chào! Bấm **+** để chọn tài liệu và tạo đề JSON. Đặt kết quả từ trang làm bài vào `input/student_results/`, rồi hỏi nhận xét theo tên, mã sinh viên hoặc buổi kiểm tra hôm nay.")
     for message in messages:
         if message.get("kind") == "exam":
             render_exam_message(message)
@@ -601,7 +543,8 @@ def chat_view(model_path, template, verify=False):
             if exam is None:
                 raise ValueError("Chưa có bộ đề để đối chiếu kết quả.")
             attempt = import_result(files[0], exam)
-            save_attempt(attempt)
+            RESULTS_INBOX.mkdir(parents=True, exist_ok=True)
+            (RESULTS_INBOX / f"{attempt['id']}_{Path(files[0].name).name}").write_bytes(files[0].getvalue())
             st.session_state["active_attempt"] = attempt
             report = attempt["report"]
             messages.append({"role": "assistant", "content":
@@ -698,7 +641,7 @@ def main():
             st.rerun()
         model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=list(MODEL_OPTIONS.values()).index(MODEL))
         model_path = MODEL_OPTIONS[model_alias]
-        st.caption("modelv1: 1.7B, dễ lặp · modelv2: 8B, chậm trên CPU · modelv3: 4B, khuyên dùng")
+        st.caption("modelv3: 4B, khuyên dùng · modelv2: 8B, chậm hơn trên CPU")
         with st.expander("Tùy chỉnh prompt tạo đề"):
             template = st.text_area("Prompt tạo đề", DEFAULT_PROMPT, height=240)
         verify = st.toggle("Kiểm tra đáp án bằng AI", value=False,
@@ -713,18 +656,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "--batch":
-        llm = load_model()
-        results = []
-        count = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-        for document in sorted(p for p in INPUT.iterdir() if p.suffix.lower() in DOCUMENT_TYPES):
-            print(f"Đang xử lý {document.name}...", flush=True)
-            try:
-                for question, prompt in generate_questions(llm, extract(document), count, DEFAULT_PROMPT):
-                    results.append(format_question(document.name, question, prompt))
-                    save_results(results)
-                    print(f"Đã lưu {len(results)} câu vào {OUTPUT}", flush=True)
-            except Exception as exc:
-                print(f"Lỗi {document.name}: {exc}", flush=True)
-    else:
-        main()
+    main()

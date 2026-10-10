@@ -2,8 +2,12 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-DOCUMENT="${1:-input/Slides CHAPTER - SVM.pdf}"
-MODEL="${2:-Qwen/Qwen3-8B}"
+if [ "$#" -lt 2 ]; then
+  echo "Usage: ./kaggle/run_kaggle.sh <document> <transformers-model> [questions]" >&2
+  exit 1
+fi
+DOCUMENT="$1"
+MODEL="$2"
 QUESTIONS="${3:-10}"
 
 mkdir -p build work output
