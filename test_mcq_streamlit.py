@@ -311,10 +311,12 @@ def test_one_chat_from_exam_to_review():
          "correct_answer": "B", "concept": "Hình học", "explanation": "Ví dụ B"},
     ]}
     uploaded = SimpleNamespace(getvalue=lambda: json.dumps({
-        "exam_id": "demo-exam", "student": "Sinh viên A", "answers": {"1": "A", "2": "A"},
+        "exam_id": "demo-exam", "student_id": "SV001", "student_name": "Sinh viên A",
+        "answers": {"1": "A", "2": "A"},
     }).encode("utf-8"))
     attempt = import_result(uploaded, exam)
     assert attempt["report"]["correct"] == 1
+    assert attempt["student_id"] == "SV001" and attempt["student_name"] == "Sinh viên A"
     ungradable = dict(exam, questions=[dict(exam["questions"][0], correct_answer="")])
     try:
         import_result(uploaded, ungradable)
@@ -323,9 +325,12 @@ def test_one_chat_from_exam_to_review():
     else:
         raise AssertionError("Đã chấm câu chưa có đáp án đúng")
     for invalid in (
-        {"exam_id": "wrong", "student": "A", "answers": {"1": "A"}},
-        {"exam_id": "demo-exam", "student": "A", "answers": {"9": "A"}},
-        {"exam_id": "demo-exam", "student": "A", "answers": {"1": "E"}},
+        {"exam_id": "wrong", "student_id": "SV001", "student_name": "A", "answers": {"1": "A"}},
+        {"exam_id": "demo-exam", "student_id": "SV001", "student_name": "A", "answers": {"9": "A"}},
+        {"exam_id": "demo-exam", "student_id": "SV001", "student_name": "A", "answers": {"1": "E"}},
+        {"exam_id": "demo-exam", "student_id": "SV001", "answers": {"1": "A"}},
+        {"exam_id": "demo-exam", "student_name": "A", "answers": {"1": "A"}},
+        {"exam_id": "demo-exam", "student": "SV001 - A", "answers": {"1": "A"}},
     ):
         try:
             import_result(SimpleNamespace(getvalue=lambda value=invalid: json.dumps(value).encode()), exam)
@@ -358,7 +363,8 @@ def test_result_file_enters_review_flow():
         {"id": 1, "question": "Alpha?", "choices": dict(zip("ABCD", ["Một", "Hai", "Ba", "Bốn"])),
          "correct_answer": "A", "concept": "Đại số"},
     ]}
-    payload = json.dumps({"exam_id": "demo-exam", "student": "SV001", "answers": {"1": "A"}}).encode()
+    payload = json.dumps({"exam_id": "demo-exam", "student_id": "SV001",
+                          "student_name": "Nguyễn Văn An", "answers": {"1": "A"}}).encode()
     with tempfile.TemporaryDirectory() as directory:
         script = f'''import mcq_streamlit as app
 from pathlib import Path
@@ -384,6 +390,7 @@ finally:
         saved = list(Path(directory, "student_results").glob("*.json"))
         assert len(saved) == 1
         assert json.loads(saved[0].read_text(encoding="utf-8"))["exam_id"] == "demo-exam"
+        assert json.loads(saved[0].read_text(encoding="utf-8"))["student_name"] == "Nguyễn Văn An"
         assert any("Đã nhận kết quả" in item.value for item in app.markdown)
 
 
@@ -391,7 +398,9 @@ def test_world_model_student_result():
     folder = Path(__file__).parent / "examples" / "world_model"
     exam = json.loads((folder / "questions.json").read_text(encoding="utf-8"))
     payload = (folder / "student_result.json").read_bytes()
-    report = import_result(SimpleNamespace(getvalue=lambda: payload), exam)["report"]
+    attempt = import_result(SimpleNamespace(getvalue=lambda: payload), exam)
+    report = attempt["report"]
+    assert attempt["student_id"] == "SV005" and attempt["student_name"] == "Sinh viên mẫu"
     assert (report["correct"], report["total"], report["percent"]) == (5, 10, 50.0)
     assert [item["id"] for item in report["details"] if not item["correct"]] == [2, 4, 6, 8, 10]
 
@@ -421,27 +430,31 @@ def test_inbox_finds_student_and_today_results():
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
             mcq_streamlit.RESULTS_INBOX = folder
-            def write(name, student, answer, exam_id="demo-exam"):
+            def write(name, student_id, student_name, answer, exam_id="demo-exam"):
                 path = folder / name
-                path.write_text(json.dumps({"exam_id": exam_id, "student": student,
+                path.write_text(json.dumps({"exam_id": exam_id, "student_id": student_id,
+                                            "student_name": student_name,
                                             "answers": {"1": answer}}), encoding="utf-8")
                 return path
-            old = write("old.json", "SV001 - Nguyễn Văn An", "A")
+            old = write("old.json", "SV001", "Tên cũ", "A")
             yesterday = (datetime.now() - timedelta(days=1)).timestamp()
             os.utime(old, (yesterday, yesterday))
-            write("new.json", "SV001 - Nguyễn Văn An", "B")
-            write("second.json", "SV002 - Trần Bình", "A")
-            write("other_exam.json", "SV003", "A", exam_id="other")
+            write("new.json", "SV001", "Nguyễn Văn An", "B")
+            write("second.json", "SV002", "Trần Bình", "A")
+            write("other_exam.json", "SV003", "Khác", "A", exam_id="other")
             (folder / "broken.json").write_text("{", encoding="utf-8")
             records, skipped = mcq_streamlit.inbox_attempts(exam, today=True)
             assert len(records) == 2 and skipped == 2
-            assert {record["attempt"]["student"] for record in records} == {
-                "SV001 - Nguyễn Văn An", "SV002 - Trần Bình"}
-            assert next(record for record in records if record["attempt"]["student"].startswith("SV001"))[
+            all_records, _ = mcq_streamlit.inbox_attempts(exam)
+            assert len(all_records) == 2
+            assert {record["attempt"]["student_id"] for record in records} == {"SV001", "SV002"}
+            assert next(record for record in records if record["attempt"]["student_id"] == "SV001")[
                 "attempt"]["report"]["correct"] == 0
-            assert mcq_streamlit.student_matches("Nhận xét sinh viên Nguyen Van An", "SV001 - Nguyễn Văn An")
-            assert mcq_streamlit.student_matches("Nhận xét SV002", "SV002 - Trần Bình")
-            assert not mcq_streamlit.student_matches("Nhận xét sinh viên", "SV002 - Trần Bình")
+            first = next(record["attempt"] for record in records if record["attempt"]["student_id"] == "SV001")
+            second = next(record["attempt"] for record in records if record["attempt"]["student_id"] == "SV002")
+            assert mcq_streamlit.student_matches("Nhận xét sinh viên Nguyen Van An", first)
+            assert mcq_streamlit.student_matches("Nhận xét SV002", second)
+            assert not mcq_streamlit.student_matches("Nhận xét sinh viên", second)
             class ReviewModel:
                 def generate_text(self, messages, **kwargs):
                     return "Nên ôn lại Đại số."
@@ -461,7 +474,8 @@ def test_chat_reads_inbox_without_attachment():
     with tempfile.TemporaryDirectory() as directory:
         folder = Path(directory)
         (folder / "result.json").write_text(json.dumps({
-            "exam_id": "demo-exam", "student": "SV001 - Nguyễn Văn An", "answers": {"1": "B"},
+            "exam_id": "demo-exam", "student_id": "SV001",
+            "student_name": "Nguyễn Văn An", "answers": {"1": "B"},
         }), encoding="utf-8")
         script = f'''import mcq_streamlit as app
 from pathlib import Path
@@ -477,12 +491,12 @@ app.main()
         app.run(timeout=30)
         app.chat_input[0].set_value("Nhận xét sinh viên Nguyễn Văn An").run(timeout=30)
         assert not app.exception, app.exception
-        assert "SV001 - Nguyễn Văn An" in app.chat_message[-1].markdown[0].value
+        assert "SV001 — Nguyễn Văn An" in app.chat_message[-1].markdown[0].value
         assert "Nên ôn lại Đại số" in app.chat_message[-1].markdown[0].value
         app.chat_input[0].set_value("Nhận xét buổi kiểm tra hôm nay").run(timeout=30)
         assert not app.exception, app.exception
         assert "Buổi kiểm tra hôm nay" in app.chat_message[-1].markdown[0].value
-        assert "SV001 - Nguyễn Văn An" in app.chat_message[-1].markdown[0].value
+        assert "SV001 — Nguyễn Văn An" in app.chat_message[-1].markdown[0].value
 
 
 if __name__ == "__main__":

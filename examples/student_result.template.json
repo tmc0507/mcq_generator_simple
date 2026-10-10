@@ -1,6 +1,7 @@
 {
   "exam_id": "SAO_CHEP_TU_questions.json",
-  "student": "MSSV_HOAC_TEN_SINH_VIEN",
+  "student_id": "SV001",
+  "student_name": "Nguyễn Văn An",
   "answers": {
     "1": "A",
     "2": "",

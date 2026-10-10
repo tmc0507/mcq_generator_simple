@@ -1,6 +1,7 @@
 {
   "exam_id": "613d20b962fc43af90b07e2e3cf026af",
-  "student": "SV005 - Sinh viên mẫu",
+  "student_id": "SV005",
+  "student_name": "Sinh viên mẫu",
   "answers": {
     "1": "B",
     "2": "A",

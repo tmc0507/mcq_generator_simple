@@ -345,10 +345,13 @@ def import_result(uploaded, exam):
            any(not question["choices"].get(letter) for letter in "ABCD")
            for question in exam["questions"]):
         raise ValueError("Bộ đề có câu thiếu đáp án hoặc lựa chọn; giảng viên cần rà soát trước khi chấm.")
-    student = data.get("student")
+    student_id = data.get("student_id")
+    student_name = data.get("student_name")
     answers = data.get("answers")
-    if not isinstance(student, str) or not student.strip():
-        raise ValueError("Kết quả thiếu tên hoặc mã sinh viên.")
+    if not isinstance(student_id, str) or not student_id.strip():
+        raise ValueError("Kết quả thiếu student_id (mã số sinh viên).")
+    if not isinstance(student_name, str) or not student_name.strip():
+        raise ValueError("Kết quả thiếu student_name (họ tên sinh viên).")
     valid_ids = {str(question["id"]) for question in exam["questions"]}
     if not isinstance(answers, dict) or any(
         key not in valid_ids or value not in ("", "A", "B", "C", "D")
@@ -357,7 +360,7 @@ def import_result(uploaded, exam):
         raise ValueError("answers phải chứa ID câu hỏi và đáp án A/B/C/D hoặc chuỗi rỗng.")
     return {
         "id": uuid.uuid4().hex, "exam_id": exam["exam_id"],
-        "student": student.strip(),
+        "student_id": student_id.strip(), "student_name": student_name.strip(),
         "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "document": exam["document"], "report": score_attempt(exam["questions"], answers),
     }
@@ -366,6 +369,10 @@ def import_result(uploaded, exam):
 def search_key(value):
     value = unicodedata.normalize("NFKD", value.casefold().replace("đ", "d"))
     return " ".join("".join(char for char in value if not unicodedata.combining(char)).split())
+
+
+def student_label(attempt):
+    return f"{attempt['student_id']} — {attempt['student_name']}"
 
 
 def inbox_attempts(exam, today=False):
@@ -382,16 +389,16 @@ def inbox_attempts(exam, today=False):
         except (OSError, ValueError):
             skipped += 1
             continue
-        key = search_key(attempt["student"])
+        key = search_key(attempt["student_id"])
         if key not in latest or received > latest[key]["received"]:
             latest[key] = {"attempt": attempt, "received": received}
     return sorted(latest.values(), key=lambda item: item["received"]), skipped
 
 
-def student_matches(prompt, student):
+def student_matches(prompt, attempt):
     text = search_key(prompt)
-    aliases = [student, *re.split(r"\s+-\s+", student)]
-    return any(len(alias.strip()) >= 3 and re.search(
+    aliases = [attempt["student_id"], attempt["student_name"]]
+    return any(re.search(
         rf"(?<!\w){re.escape(search_key(alias))}(?!\w)", text)
         for alias in aliases)
 
@@ -450,7 +457,7 @@ def class_reply(llm, question, records, skipped=0):
         weak = [name for name, score in report["by_concept"].items() if score["correct"] < score["total"]]
         weak_topics.update(weak)
         lines.extend([
-            f"**{attempt['student']}** — {report['correct']}/{report['total']} ({report['percent']}%).",
+            f"**{student_label(attempt)}** — {report['correct']}/{report['total']} ({report['percent']}%).",
             f"- Điểm mạnh: {', '.join(strong) or 'Chưa có chủ đề trả lời đúng'}.",
             f"- Cần cải thiện: {', '.join(weak) or 'Không có câu sai'}.",
         ])
@@ -548,7 +555,7 @@ def chat_view(model_path, template, verify=False):
             st.session_state["active_attempt"] = attempt
             report = attempt["report"]
             messages.append({"role": "assistant", "content":
-                             f"Đã nhận kết quả của **{attempt['student']}**: "
+                             f"Đã nhận kết quả của **{student_label(attempt)}**: "
                              f"{report['correct']}/{report['total']} ({report['percent']}%). "
                              "Hãy hỏi tôi nhận xét bài làm này."})
         except Exception as exc:
@@ -586,15 +593,15 @@ def chat_view(model_path, template, verify=False):
                          if item.get("kind") == "exam"), None) or read_exam()
             today = "hom nay" in search_key(prompt)
             records, skipped = inbox_attempts(exam, today=today) if exam else ([], 0)
-            matches = [item for item in records if student_matches(prompt, item["attempt"]["student"])]
+            matches = [item for item in records if student_matches(prompt, item["attempt"])]
             if len(matches) > 1:
-                names = ", ".join(item["attempt"]["student"] for item in matches)
+                names = ", ".join(student_label(item["attempt"]) for item in matches)
                 answer = f"Có nhiều sinh viên khớp yêu cầu: {names}. Hãy ghi mã sinh viên cụ thể."
             elif matches:
                 attempt = matches[0]["attempt"]
                 with st.chat_message("assistant", avatar="🎓"):
-                    with st.spinner(f"Đang nhận xét {attempt['student']}..."):
-                        answer = f"**{attempt['student']}** — " + teacher_reply(
+                    with st.spinner(f"Đang nhận xét {student_label(attempt)}..."):
+                        answer = f"**{student_label(attempt)}** — " + teacher_reply(
                             load_model(model_path), prompt, attempt["report"])
             elif today:
                 if records:
