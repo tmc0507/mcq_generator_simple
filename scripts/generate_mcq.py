@@ -34,7 +34,7 @@ MCQ_SCHEMA = {
                     "explanation": {"type": "string"},
                     "evidence": {"type": "string"},
                     "source_index": {"type": "integer"},
-                    "source_type": {"type": "string", "enum": ["page", "slide", "section"]},
+                    "source_type": {"type": "string", "enum": ["page", "slide", "section", "row"]},
                 },
                 "required": [
                     "question", "choices", "correct_answer", "concept", "difficulty",
@@ -60,6 +60,14 @@ VERIFY_SCHEMA = {
     },
     "required": ["status", "issues", "corrected_question"],
 }
+
+
+def mcq_schema_for_chunk(chunk):
+    schema = json.loads(json.dumps(MCQ_SCHEMA))
+    fields = schema["properties"]["questions"]["items"]["properties"]
+    fields["source_index"]["enum"] = sorted(set(chunk["source_indices"]))
+    fields["source_type"]["enum"] = sorted(set(chunk["source_types"]))
+    return schema
 
 
 def normalize_text(text: str) -> str:
@@ -121,7 +129,7 @@ def validate_mcq(q, valid_sources):
         issues.append("difficulty không hợp lệ")
     if type(q.get("source_index")) is not int or q["source_index"] < 1:
         issues.append("source_index phải là integer")
-    if not isinstance(q.get("source_type"), str) or q["source_type"] not in {"page", "slide", "section"}:
+    if not isinstance(q.get("source_type"), str) or q["source_type"] not in {"page", "slide", "section", "row"}:
         issues.append("source_type không hợp lệ")
     if not any(issue.startswith("source_") for issue in issues) and (q["source_type"], q["source_index"]) not in valid_sources:
         issues.append("source không tồn tại trong tài liệu")
@@ -154,8 +162,11 @@ def parse_json_text(raw):
 def allocate_questions(chunks, total):
     if total <= 0:
         return [0] * len(chunks)
-    lengths = [len(c.get("text", "").strip()) for c in chunks]
-    lengths = [length if length >= 200 else 0 for length in lengths]
+    lengths = []
+    for chunk in chunks:
+        length = len(chunk.get("text", "").strip())
+        minimum = 80 if "row" in chunk.get("source_types", []) else 200
+        lengths.append(length if length >= minimum else 0)
     total_chars = sum(lengths)
     if not total_chars:
         return [0] * len(chunks)
@@ -178,9 +189,11 @@ QUY TẮC TUYỆT ĐỐI:
 - CHỈ dùng thông tin có trong SOURCE bên dưới.
 - Không dùng kiến thức có sẵn của model nếu SOURCE không chứa nó.
 - Không suy diễn vượt SOURCE.
+- Viết câu hỏi, lựa chọn, giải thích và concept bằng tiếng Việt; giữ nguyên thuật ngữ chuyên ngành khi cần.
 - Mỗi câu có đúng 4 lựa chọn A/B/C/D và đúng 1 đáp án đúng.
 - Distractor phải hợp lý nhưng phải sai theo SOURCE.
 - evidence phải là đoạn text thực sự xuất hiện trong SOURCE.
+- Sao chép evidence NGUYÊN VĂN từ SOURCE; không thêm "Trang", nhãn, dấu nháy hoặc diễn giải.
 - source_index và source_type phải trỏ đúng nơi chứa evidence.
 - Nếu SOURCE không đủ tạo {count} câu tốt, hãy tạo ít hơn. Không hallucinate để đủ số lượng.
 
@@ -190,6 +203,7 @@ DIFFICULTY:
 - hard: áp dụng công thức, tính toán, suy luận nhiều bước, phân tích tình huống.
 
 Nguồn hợp lệ trong chunk: {allowed}
+source_index CHỈ được chọn trong {sorted(set(chunk['source_indices']))}.
 Số câu tối đa cần tạo: {count}
 
 SOURCE:
@@ -215,6 +229,7 @@ Kiểm tra:
 6. distractor có hợp lý không?
 7. concept có phù hợp không?
 8. difficulty có đúng rubric không?
+9. Câu hỏi và lựa chọn có viết bằng tiếng Việt không?
 
 Rubric difficulty:
 - easy: định nghĩa, nhận biết, fact trực tiếp.
@@ -411,7 +426,7 @@ def validate_chunks(data):
     source_map = {}
     for block in data["blocks"]:
         if (not isinstance(block, dict) or type(block.get("index")) is not int
-                or block["index"] < 1 or block.get("type") not in ("page", "slide", "section")
+                or block["index"] < 1 or block.get("type") not in ("page", "slide", "section", "row")
                 or not isinstance(block.get("text"), str)):
             raise ValueError("Block trong chunks.json không hợp lệ")
         source_map[(block["type"], block["index"])] = block["text"]
@@ -506,7 +521,7 @@ def main():
                     {"role": "system", "content": "Bạn tạo MCQ có căn cứ hoàn toàn từ SOURCE và chỉ trả JSON."},
                     {"role": "user", "content": prompt},
                 ],
-                schema=MCQ_SCHEMA,
+                schema=mcq_schema_for_chunk(chunk),
                 max_tokens=generation_budget,
                 temperature=0.4,
                 debug_path=Path("debug") / f"chunk_{idx:03d}" if args.debug else None,

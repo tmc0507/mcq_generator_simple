@@ -1,1 +1,2 @@
 llama-cpp-python
+streamlit>=1.65

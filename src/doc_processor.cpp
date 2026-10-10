@@ -11,6 +11,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <sys/wait.h>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -47,7 +48,8 @@ static std::string run_capture(const std::string& command) {
         result += buffer.data();
     }
     const int code = pclose(pipe);
-    if (code != 0) throw std::runtime_error("Lệnh thất bại (code " + std::to_string(code) + "): " + command);
+    if (code != 0) throw std::runtime_error("Lệnh thất bại (code "
+        + std::to_string(WIFEXITED(code) ? WEXITSTATUS(code) : code) + "): " + command);
     return result;
 }
 
@@ -181,15 +183,84 @@ static std::vector<SourceBlock> read_docx(const fs::path& path) {
     return blocks;
 }
 
+static std::vector<SourceBlock> read_csv(const fs::path& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("Không thể mở CSV: " + path.string());
+    std::vector<std::vector<std::string>> rows;
+    std::vector<std::string> row;
+    std::string field;
+    bool quoted = false;
+    for (char c; file.get(c);) {
+        if (quoted) {
+            if (c == '"' && file.peek() == '"') { field += '"'; file.get(); }
+            else if (c == '"') quoted = false;
+            else field += c;
+        } else if (c == '"' && field.empty()) quoted = true;
+        else if (c == ',') { row.push_back(trim(field)); field.clear(); }
+        else if (c == '\n') {
+            row.push_back(trim(field)); field.clear();
+            rows.push_back(std::move(row)); row.clear();
+        } else if (c != '\r') field += c;
+    }
+    if (quoted) throw std::runtime_error("CSV có dấu nháy kép chưa đóng");
+    if (!field.empty() || !row.empty()) { row.push_back(trim(field)); rows.push_back(std::move(row)); }
+    if (rows.empty()) return {};
+    if (rows[0][0].rfind("\xEF\xBB\xBF", 0) == 0) rows[0][0].erase(0, 3);
+    const auto headers = rows[0];
+    std::vector<SourceBlock> blocks;
+    for (size_t i = 1; i < rows.size(); ++i) {
+        std::string text;
+        for (size_t j = 0; j < rows[i].size(); ++j) {
+            if (rows[i][j].empty()) continue;
+            if (!text.empty()) text += " | ";
+            text += (j < headers.size() && !headers[j].empty() ? headers[j] : "column " + std::to_string(j + 1));
+            text += ": " + rows[i][j];
+        }
+        if (!text.empty()) blocks.push_back({static_cast<int>(i + 1), "row", clean_text(text)});
+    }
+    return blocks;
+}
+
+static std::vector<SourceBlock> read_legacy_office(const fs::path& path, const std::string& format) {
+    std::string name = (fs::temp_directory_path() / "mcq_office_XXXXXX").string();
+    std::vector<char> buffer(name.begin(), name.end());
+    buffer.push_back('\0');
+    char* created = mkdtemp(buffer.data());
+    if (!created) throw std::runtime_error("Không thể tạo thư mục tạm để chuyển đổi Office");
+    const fs::path temporary(created);
+    try {
+        const std::string command = "libreoffice -env:UserInstallation="
+            + shell_quote("file://" + (temporary / "profile").string())
+            + " --headless --convert-to " + format + " --outdir "
+            + shell_quote(temporary.string()) + " " + shell_quote(fs::absolute(path).string());
+        try {
+            run_capture(command);
+        } catch (const std::runtime_error& e) {
+            throw std::runtime_error("LibreOffice không chuyển được " + path.string()
+                + "; hãy kiểm tra LibreOffice hoặc lưu lại thành ." + format + ". Chi tiết: " + e.what());
+        }
+        fs::path converted = temporary / path.filename();
+        converted.replace_extension("." + format);
+        if (!fs::exists(converted)) throw std::runtime_error("LibreOffice không tạo được " + converted.string()
+            + "; hãy kiểm tra gói " + (format == "pptx" ? "libreoffice-impress" : "libreoffice-writer"));
+        auto blocks = format == "docx" ? read_docx(converted) : read_pptx(converted);
+        fs::remove_all(temporary);
+        return blocks;
+    } catch (...) {
+        fs::remove_all(temporary);
+        throw;
+    }
+}
+
 static std::vector<SourceBlock> read_document(const fs::path& path) {
     std::string ext = path.extension().string();
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
     if (ext == ".pdf") return read_pdf(path);
     if (ext == ".pptx") return read_pptx(path);
     if (ext == ".docx") return read_docx(path);
-    if (ext == ".ppt" || ext == ".doc") {
-        throw std::runtime_error("V1 chưa hỗ trợ .ppt/.doc cũ. Hãy chuyển sang .pptx/.docx.");
-    }
+    if (ext == ".csv") return read_csv(path);
+    if (ext == ".ppt") return read_legacy_office(path, "pptx");
+    if (ext == ".doc") return read_legacy_office(path, "docx");
     throw std::runtime_error("Định dạng chưa hỗ trợ: " + ext);
 }
 
@@ -303,7 +374,7 @@ static void write_json(const fs::path& out_path, const fs::path& source, const s
 
 static void print_usage() {
     std::cout << "Usage:\n"
-              << "  doc_processor FILE --output work/chunks.json [--blocks-per-chunk 3] [--chunk-chars 12000]\n";
+              << "  doc_processor FILE.(pdf|pptx|docx|csv|ppt|doc) --output work/chunks.json [--blocks-per-chunk 3] [--chunk-chars 12000]\n";
 }
 
 int main(int argc, char** argv) {

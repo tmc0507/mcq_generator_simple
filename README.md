@@ -1,15 +1,15 @@
-# MCQ Generator Simple V1
+# Trợ lý tạo đề và nhận xét bài làm
 
 Một pipeline xử lý tài liệu và kiểm chứng MCQ, với hai backend inference:
 
 ```text
-PDF / PPTX / DOCX
+PDF / PPTX / DOCX / CSV / DOC / PPT
         ↓
 C++ extract text
         ↓
 C++ chia chunk
         ↓
-Qwen3-8B: GGUF local hoặc Transformers 4-bit trên Kaggle
+Qwen3-4B/8B GGUF local hoặc Qwen3-8B Transformers 4-bit trên Kaggle
         ↓
 Python (model chỉ load 1 lần cho generator và verifier)
         ↓
@@ -24,7 +24,7 @@ Deduplicate
 output/questions.json
 ```
 
-Không có HTTP, REST API, database, RAG hay fine-tune ở V1.
+CLI không có REST API, database, RAG hay fine-tune. Giao diện Streamlit chạy local và lưu đề/bài làm trong `output/`.
 
 ## LOCAL MODE — GGUF + llama-cpp-python
 
@@ -32,10 +32,11 @@ Không có HTTP, REST API, database, RAG hay fine-tune ở V1.
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential cmake poppler-utils unzip python3-venv python3-pip
+sudo apt install -y build-essential cmake poppler-utils unzip libreoffice-writer libreoffice-impress python3-venv python3-pip
 ```
 
 `pdftotext` từ `poppler-utils` được dùng để đọc PDF. `unzip` được dùng để đọc XML bên trong PPTX/DOCX.
+`.doc` cần LibreOffice Writer và `.ppt` cần LibreOffice Impress để chuyển tạm sang định dạng mới trước khi trích text. CSV dùng dòng đầu làm tên cột và giữ số dòng làm nguồn dẫn chứng.
 
 ### Build C++ document processor
 
@@ -73,7 +74,7 @@ pip install -U pip
 #### CPU only
 
 ```bash
-pip install llama-cpp-python
+pip install -r scripts/requirements.txt
 ```
 
 #### NVIDIA CUDA
@@ -86,7 +87,18 @@ CMAKE_ARGS="-DGGML_CUDA=on" pip install --upgrade --force-reinstall llama-cpp-py
 
 Nếu máy thiếu dependency build hoặc CUDA compiler không tương thích, hãy thử CPU trước để xác nhận pipeline chạy đúng.
 
-### Model
+### Model nhẹ cho giao diện
+
+Có thể thử Qwen3-4B Q4_K_M GGUF (khoảng 2.5 GB) để giảm dung lượng:
+
+```bash
+pip install -U huggingface_hub
+hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+```
+
+Giao diện mặc định chọn `modelv2` (`models/Qwen3-8B-Q4_K_M.gguf`) khi có; chọn `modelv1` để thử bản 4B. Trên PDF SVM mẫu, 4B đã tạo một số câu thiếu `source_index`/evidence hợp lệ, nên chưa coi chất lượng tương đương 8B. Nếu chỉ có 4B, giao diện tự chọn `modelv1`.
+
+### Model 8B cho CLI
 
 Dùng file:
 
@@ -109,6 +121,23 @@ hf download Qwen/Qwen3-8B-GGUF Qwen3-8B-Q4_K_M.gguf \
 ```
 
 Model khoảng 5 GB.
+
+### Giao diện Streamlit
+
+```bash
+streamlit run mcq_streamlit.py
+```
+
+Mọi thao tác nằm trong **một cuộc trò chuyện**:
+
+1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Mỗi câu vẫn qua kiểm tra cấu trúc, evidence và semantic verifier.
+2. Khi đề hiện trong chat, bấm **Tải bộ đề TXT** để lưu bản chỉ gồm câu hỏi và lựa chọn. Đề JSON lưu ở `output/questions.json`, bản TXT ở `output/questions.txt`.
+3. Sinh viên nhập tên/mã, chọn đáp án và **Nộp bài** ngay trong thẻ đề. Kết quả lưu ở `output/attempts.json`.
+4. Nhập câu hỏi tiếp trong cùng ô chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Chatbot dùng kết quả bài vừa nộp; nhận xét từ một bài kiểm tra không phải đánh giá năng lực toàn diện.
+
+Thanh bên cho phép đổi giữa `modelv1` (GGUF 4B, nhẹ hơn) và `modelv2` (GGUF 8B, mặc định), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
+
+Model được cache để tạo đề, verifier và chat dùng cùng một bản trong RAM. Chạy CPU với 8B có thể chậm; dùng GGUF 4B hoặc GPU nếu có.
 
 ### Chạy toàn pipeline
 
@@ -190,4 +219,4 @@ Cả hai backend ghi `output/questions.json` với `document`, `backend`, `model
 
 Evidence checker chỉ kiểm tra đoạn trích có trong tài liệu; cùng model đang load sẽ kiểm tra nghĩa và đáp án. Sau `REVISE`, code kiểm tra lại cấu trúc và evidence. Qwen3 dùng `/no_think` trong prompt local và `enable_thinking=False` trong chat template Transformers; parser loại `<think>` nếu model vẫn xuất ra.
 
-Hỗ trợ `.pdf`, `.pptx`, `.docx`. Chưa có OCR cho PDF scan, đọc ảnh trong slide, hay hỗ trợ `.ppt`/`.doc` cũ. Có thể đổi `--model` thành đường dẫn model khác mà không sửa pipeline.
+Hỗ trợ `.pdf`, `.pptx`, `.docx`, `.csv`, `.ppt`, `.doc`. Chưa có OCR cho PDF scan hay đọc ảnh trong slide. Có thể đổi `--model` thành đường dẫn model khác mà không sửa pipeline.

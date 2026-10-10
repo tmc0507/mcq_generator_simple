@@ -1,10 +1,14 @@
 """Generate grounded MCQs from local documents with an editable prompt."""
 
 import json
+import fcntl
 import os
+import re
 import subprocess
 import sys
 import tempfile
+import uuid
+from datetime import datetime, timezone
 from itertools import cycle
 from pathlib import Path
 
@@ -12,18 +16,27 @@ import streamlit as st
 
 
 SOURCE = Path(__file__).resolve().parent
-MODEL = SOURCE / "models/Qwen3-8B-Q4_K_M.gguf"
+SMALL_MODEL = SOURCE / "models/Qwen3-4B-Q4_K_M.gguf"
+LARGE_MODEL = SOURCE / "models/Qwen3-8B-Q4_K_M.gguf"
+MODEL = LARGE_MODEL if LARGE_MODEL.is_file() else SMALL_MODEL
 INPUT = SOURCE / "input"
 OUTPUT = SOURCE / "output/mcq_questions.txt"
+EXAM = SOURCE / "output/questions.json"
+EXAM_TXT = SOURCE / "output/questions.txt"
+ATTEMPTS = SOURCE / "output/attempts.json"
+DOCUMENT_TYPES = {".pdf", ".docx", ".pptx", ".csv", ".doc", ".ppt"}
+MODEL_OPTIONS = {"modelv1": SMALL_MODEL, "modelv2": LARGE_MODEL}
 sys.path.insert(0, str(SOURCE / "scripts"))
 
 from generate_mcq import (  # noqa: E402
     LlamaCppBackend,
-    MCQ_SCHEMA,
+    mcq_schema_for_chunk,
     ask_json,
     deduplicate,
     evidence_score,
     validate_mcq,
+    build_verifier_prompt,
+    VERIFY_SCHEMA,
 )
 
 
@@ -44,9 +57,9 @@ SYSTEM_PROMPT = "Chỉ dùng SOURCE để tạo MCQ; chỉ trả JSON theo schem
 
 
 @st.cache_resource
-def load_model():
+def load_model(model_path=None):
     return LlamaCppBackend(
-        model=str(MODEL),
+        model=str(model_path or MODEL),
         n_ctx=3072,
         n_gpu_layers=0,
         threads=min(4, os.cpu_count() or 4),
@@ -56,11 +69,13 @@ def load_model():
 def extract(document):
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / "chunks.json"
-        subprocess.run(
+        result = subprocess.run(
             [str(SOURCE / "build/doc_processor"), str(document), "--output", str(path),
              "--blocks-per-chunk", "3", "--chunk-chars", "3000"],
-            check=True, capture_output=True, text=True,
+            capture_output=True, text=True,
         )
+        if result.returncode:
+            raise RuntimeError(result.stderr.strip() or "Không đọc được tài liệu")
         return json.loads(path.read_text(encoding="utf-8"))
 
 
@@ -81,7 +96,7 @@ def render_prompt(template, chunk, index, total, previous):
     return prompt
 
 
-def generate_questions(llm, data, count, template, on_attempt=None):
+def generate_questions(llm, data, count, template, on_attempt=None, verify=False):
     source_map = {(b["type"], b["index"]): b["text"] for b in data["blocks"]}
     chunks = [chunk for chunk in data["chunks"] if len(chunk["text"]) >= 200] or data["chunks"]
     if not chunks:
@@ -99,7 +114,7 @@ def generate_questions(llm, data, count, template, on_attempt=None):
                 llm,
                 [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content": prompt}],
-                MCQ_SCHEMA,
+                mcq_schema_for_chunk(chunk),
                 max_tokens=900,
                 temperature=0.3,
             )
@@ -113,6 +128,32 @@ def generate_questions(llm, data, count, template, on_attempt=None):
                 continue
             if evidence_score(question["evidence"], source_map[source_key]) < 0.75:
                 continue
+            if verify:
+                try:
+                    verdict = ask_json(
+                        llm,
+                        [{"role": "system", "content": "Bạn là verifier nghiêm ngặt. Chỉ dựa trên SOURCE."},
+                         {"role": "user", "content": build_verifier_prompt(question, source_map[source_key])}],
+                        VERIFY_SCHEMA, max_tokens=1200, temperature=0,
+                    )
+                except (ValueError, RuntimeError):
+                    continue
+                status = verdict.get("status")
+                if status == "REVISE":
+                    revised = verdict.get("corrected_question")
+                    if validate_mcq(revised, source_map):
+                        continue
+                    revised_key = (revised["source_type"], revised["source_index"])
+                    if revised_key not in zip(chunk["source_types"], chunk["source_indices"]):
+                        continue
+                    if evidence_score(revised["evidence"], source_map[revised_key]) < 0.75:
+                        continue
+                    question = revised
+                    source_key = revised_key
+                elif status != "PASS":
+                    continue
+                question["verifier_status"] = status
+            question["evidence_score"] = round(evidence_score(question["evidence"], source_map[source_key]), 4)
             if len(deduplicate(accepted + [question])) == len(accepted):
                 continue
             accepted.append(question)
@@ -141,48 +182,292 @@ def save_results(results):
     OUTPUT.write_text("\n\n".join(results) + "\n", encoding="utf-8")
 
 
-def main():
-    st.title("Tạo câu hỏi trắc nghiệm từ tài liệu")
-    documents = sorted(p for p in INPUT.iterdir() if p.suffix.lower() in {".pdf", ".docx", ".pptx"})
-    selected = st.multiselect("Tài liệu", documents, default=documents,
-                              format_func=lambda p: p.name)
-    count = st.number_input("Số câu cho mỗi tài liệu", min_value=1, value=1, step=1)
-    template = st.text_area("Prompt của bạn", DEFAULT_PROMPT, height=320)
-    st.caption("Có thể sửa toàn bộ prompt. Các biến {source}, {total}, {index}, {allowed_sources}, {previous_questions} được điền tự động.")
-    st.caption("Model chạy trên CPU; mỗi câu có thể mất vài phút.")
-    if st.button("Tạo câu hỏi", disabled=not selected):
-        try:
-            if not MODEL.is_file():
-                raise FileNotFoundError(MODEL)
-            llm = load_model()
-            results = []
-            progress = st.progress(0)
-            for index, document in enumerate(selected, 1):
-                with st.status(f"Đang xử lý: {document.name}"):
-                    try:
-                        created = 0
-                        attempt_info = st.empty()
-                        def show_attempt(attempt, accepted):
-                            attempt_info.write(f"Lần thử {attempt} · đã tạo {accepted}/{count} câu")
+def question_count(prompt):
+    match = re.search(r"(?<!\d)(\d+)\s*(?:câu(?: hỏi)?|questions?)\b", prompt, re.IGNORECASE)
+    count = int(match.group(1)) if match else 10
+    if not 1 <= count <= 50:
+        raise ValueError("Số câu phải từ 1 đến 50 (ví dụ: Tạo 10 câu hỏi).")
+    return count
 
-                        for question, prompt in generate_questions(llm, extract(document), int(count), template, show_attempt):
-                            results.append(format_question(document.name, question, prompt))
-                            save_results(results)
-                            created += 1
-                            st.write(f"Đã tạo {created}/{count} câu")
-                            progress.progress(((index - 1) * count + created) / (len(selected) * count))
-                        if created < count:
-                            st.warning(f"{document.name}: tạo được {created}/{count} câu có dẫn chứng hợp lệ.")
-                    except Exception as exc:
-                        st.error(f"{document.name}: {exc}")
-                progress.progress(index / len(selected))
-            if results:
-                st.success(f"Đã lưu {len(results)} câu vào {OUTPUT}")
+
+def format_exam_txt(exam):
+    lines = [f"BỘ ĐỀ: {exam['document']}", f"Số câu: {len(exam['questions'])}", ""]
+    for position, question in enumerate(exam["questions"], 1):
+        lines.append(f"Câu {position}. {question['question']}")
+        lines.extend(f"{letter}. {question['choices'][letter]}" for letter in "ABCD")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def create_exam(uploaded, model_path, count, template, on_attempt=None):
+    if not Path(model_path).is_file():
+        raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
+    document_name = Path(uploaded.name).name
+    if Path(document_name).suffix.lower() not in DOCUMENT_TYPES:
+        raise ValueError("Chỉ hỗ trợ PDF, DOC/DOCX, PPT/PPTX và CSV.")
+    with tempfile.TemporaryDirectory() as directory:
+        document = Path(directory) / document_name
+        document.write_bytes(uploaded.getvalue())
+        data = extract(document)
+    llm = load_model(model_path)
+    questions = []
+    results = []
+    for question, prompt in generate_questions(llm, data, count, template, on_attempt, verify=True):
+        question["id"] = len(questions) + 1
+        question["source"] = {"type": question["source_type"], "index": question["source_index"]}
+        questions.append(question)
+        results.append(format_question(document_name, question, prompt))
+    if not questions:
+        raise ValueError("Không tạo được câu hỏi có căn cứ; thử tài liệu có nhiều nội dung hơn.")
+    exam = {
+        "document": document_name, "backend": "llama_cpp", "model": str(model_path),
+        "requested_questions": count, "accepted_questions": len(questions), "questions": questions,
+    }
+    write_json(EXAM, exam)
+    save_results(results)
+    EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
+    EXAM_TXT.write_text(format_exam_txt(exam), encoding="utf-8")
+    return exam
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary.replace(path)
+
+
+def read_exam():
+    if not EXAM.is_file():
+        return None
+    exam = json.loads(EXAM.read_text(encoding="utf-8"))
+    if not isinstance(exam.get("questions"), list):
+        raise ValueError("output/questions.json không có danh sách questions")
+    for question in exam["questions"]:
+        if (not isinstance(question, dict) or not isinstance(question.get("question"), str)
+                or not isinstance(question.get("choices"), dict)
+                or set(question["choices"]) != set("ABCD")
+                or question.get("correct_answer") not in ("A", "B", "C", "D")):
+            raise ValueError("Đề có câu hỏi không hợp lệ")
+    return exam
+
+
+def score_attempt(questions, answers):
+    by_concept = {}
+    details = []
+    correct = 0
+    for position, question in enumerate(questions, 1):
+        answer = answers.get(str(question.get("id", position)), "")
+        is_correct = answer == question["correct_answer"]
+        correct += is_correct
+        concept = question.get("concept") or "Chưa phân loại"
+        totals = by_concept.setdefault(concept, {"correct": 0, "total": 0})
+        totals["correct"] += is_correct
+        totals["total"] += 1
+        details.append({
+            "id": question.get("id", position), "concept": concept,
+            "question": question["question"], "student_answer": answer or "Bỏ trống",
+            "correct_answer": question["correct_answer"], "correct": is_correct,
+            "student_choice": question.get("choices", {}).get(answer, ""),
+            "correct_choice": question.get("choices", {}).get(question["correct_answer"], ""),
+            "explanation": question.get("explanation", ""),
+        })
+    total = len(questions)
+    return {
+        "correct": correct, "total": total,
+        "percent": round(correct * 100 / total, 1) if total else 0,
+        "by_concept": by_concept, "details": details,
+    }
+
+
+def read_attempts():
+    if not ATTEMPTS.is_file():
+        return []
+    attempts = json.loads(ATTEMPTS.read_text(encoding="utf-8"))
+    if not isinstance(attempts, list):
+        raise ValueError("output/attempts.json không hợp lệ")
+    return attempts
+
+
+def save_attempt(attempt):
+    ATTEMPTS.parent.mkdir(parents=True, exist_ok=True)
+    with (ATTEMPTS.parent / ".attempts.lock").open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        attempts = read_attempts()
+        attempts.append(attempt)
+        write_json(ATTEMPTS, attempts)
+
+
+def teacher_reply(llm, question, report):
+    # shortcut: send at most 12 missed questions to fit the local model context; expand if longer exams are common.
+    all_misses = [item for item in report["details"] if not item["correct"]]
+    misses = all_misses[:12]
+    facts = {key: report[key] for key in ("correct", "total", "percent", "by_concept")}
+    facts["missed_questions"] = misses
+    facts["omitted_missed_questions"] = len(all_misses) - len(misses)
+    raw = llm.generate_text(
+        [{"role": "system", "content":
+          "/no_think\nBạn là trợ lý cho giảng viên. Chỉ dựa trên kết quả bài làm được cung cấp. "
+          "Trả lời bằng tiếng Việt, tối đa 150 từ, theo ba mục: Điểm mạnh, Cần cải thiện, Gợi ý ôn tập. "
+          "Ở mục Cần cải thiện, liệt kê đủ số câu và chủ đề của từng câu trả lời sai. "
+          "Chỉ dùng cách nói 'trả lời đúng/sai'; không suy đoán sinh viên hiểu hay không hiểu. "
+          "Không kết luận năng lực hay tính cách toàn diện. Nếu dữ liệu thiếu, nói rõ."},
+         {"role": "user", "content":
+          f"Kết quả bài làm (JSON): {json.dumps(facts, ensure_ascii=False)}\n"
+          f"Các câu sai bắt buộc nhắc tới: {[(item['id'], item['concept']) for item in misses]}\n"
+          f"Câu hỏi của giảng viên: {question}"}],
+        max_new_tokens=450, temperature=0, do_sample=False,
+    )
+    answer = re.sub(r"<think>.*?</think>", "", raw, flags=re.DOTALL).strip()
+    if "<think>" in answer or not answer:
+        raise ValueError("Model chưa trả lời xong; hãy thử lại với câu hỏi ngắn hơn.")
+    answer = re.sub(r"\b(?:đã )?nắm vững\b", "trả lời đúng câu hỏi về", answer, flags=re.IGNORECASE)
+    answer = re.sub(r"\bchưa hiểu(?: rõ)?\b", "trả lời sai câu hỏi về", answer, flags=re.IGNORECASE)
+    return answer
+
+
+def render_exam_message(message):
+    exam = message["exam"]
+    with st.chat_message("assistant", avatar="🎓"):
+        st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải đề TXT hoặc làm bài ngay dưới đây.")
+        st.download_button(
+            "⬇ Tải bộ đề TXT", format_exam_txt(exam),
+            file_name=f"{Path(exam['document']).stem}_questions.txt", mime="text/plain",
+            key="download_" + message["id"],
+        )
+        if message.get("attempt"):
+            attempt = message["attempt"]
+            report = attempt["report"]
+            st.success(f"{attempt['student']}: {report['correct']}/{report['total']} ({report['percent']}%).")
+            return
+        if st.session_state.get("active_exam_id") != message["id"]:
+            st.caption("Đây là bộ đề cũ trong cuộc trò chuyện; hãy làm bộ đề mới nhất ở dưới.")
+            return
+        with st.form("quiz_" + message["id"]):
+            student = st.text_input("Tên hoặc mã sinh viên")
+            answers = {}
+            for position, question in enumerate(exam["questions"], 1):
+                st.markdown(f"**Câu {position}. {question['question']}**")
+                choices = question["choices"]
+                answers[str(question.get("id", position))] = st.radio(
+                    "Chọn đáp án", list("ABCD"), index=None,
+                    format_func=lambda letter, options=choices: f"{letter}. {options[letter]}",
+                    key=f"quiz_{message['id']}_{position}", label_visibility="collapsed",
+                ) or ""
+            submitted = st.form_submit_button("Nộp bài", type="primary")
+        if submitted:
+            if not student.strip():
+                st.error("Nhập tên hoặc mã sinh viên trước khi nộp bài.")
+                return
+            report = score_attempt(exam["questions"], answers)
+            attempt = {
+                "id": uuid.uuid4().hex, "student": student.strip(),
+                "submitted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                "document": exam["document"], "report": report,
+            }
+            save_attempt(attempt)
+            message["attempt"] = attempt
+            st.session_state["active_attempt"] = attempt
+            st.session_state["messages"].extend([
+                {"role": "user", "content": f"{student.strip()} đã nộp bài."},
+                {"role": "assistant", "content":
+                 f"Đã chấm: **{report['correct']}/{report['total']}** ({report['percent']}%). "
+                 "Bạn có thể hỏi tôi nhận xét về bài làm này ngay trong ô chat."},
+            ])
+            st.rerun()
+
+
+def chat_view(model_path, template):
+    st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu bằng dấu +, làm bài và hỏi tiếp ngay tại đây.</p></div>', unsafe_allow_html=True)
+    messages = st.session_state.setdefault("messages", [])
+    if not messages:
+        with st.chat_message("assistant", avatar="🎓"):
+            st.write("Xin chào! Bấm **+** ở ô chat để chọn PDF, DOC/DOCX, PPT/PPTX hoặc CSV. Nhập **Tạo 10 câu hỏi** rồi gửi. Sau khi sinh viên nộp bài, hãy hỏi tôi về kết quả ngay tại đây.")
+    for message in messages:
+        if message.get("kind") == "exam":
+            render_exam_message(message)
+        else:
+            with st.chat_message(message["role"], avatar="🎓" if message["role"] == "assistant" else "👤"):
+                st.write(message["content"])
+    submission = st.chat_input(
+        "Đính kèm tài liệu bằng dấu + hoặc hỏi về bài làm...",
+        accept_file=True, file_type=["pdf", "doc", "docx", "ppt", "pptx", "csv"],
+    )
+    if submission is None:
+        return
+    prompt = (submission.text or "").strip()
+    files = submission.files
+    if not prompt and not files:
+        return
+    content = prompt or "Tạo bộ đề từ tài liệu"
+    if files:
+        content += f"\n\n📎 {files[0].name}"
+    messages.append({"role": "user", "content": content})
+    with st.chat_message("user", avatar="👤"):
+        st.write(content)
+    if files:
+        try:
+            count = question_count(prompt)
+            with st.chat_message("assistant", avatar="🎓"):
+                with st.spinner(f"Đang đọc tài liệu và tạo tối đa {count} câu hỏi..."):
+                    progress = st.empty()
+                    exam = create_exam(
+                        files[0], model_path, count, template,
+                        lambda attempt, accepted: progress.write(
+                            f"Lần thử {attempt} · đã xác minh {accepted}/{count} câu"),
+                    )
+                    progress.empty()
+            exam_id = uuid.uuid4().hex
+            messages.append({"role": "assistant", "kind": "exam", "id": exam_id, "exam": exam})
+            st.session_state["active_exam_id"] = exam_id
+            st.session_state.pop("active_attempt", None)
         except Exception as exc:
-            st.error(str(exc))
-    if OUTPUT.is_file():
-        st.download_button("Tải file TXT", OUTPUT.read_bytes(), file_name=OUTPUT.name)
-        st.text_area("Nội dung TXT", OUTPUT.read_text(encoding="utf-8"), height=320, disabled=True)
+            messages.append({"role": "assistant", "content": f"Không tạo được đề: {exc}"})
+    elif "active_attempt" in st.session_state:
+        try:
+            with st.chat_message("assistant", avatar="🎓"):
+                with st.spinner("Đang nhận xét bài làm..."):
+                    answer = teacher_reply(load_model(model_path), prompt, st.session_state["active_attempt"]["report"])
+            messages.append({"role": "assistant", "content": answer})
+        except Exception as exc:
+            messages.append({"role": "assistant", "content": f"Chưa thể nhận xét: {exc}"})
+    else:
+        answer = ("Hãy hoàn thành và nộp bộ đề trong cuộc trò chuyện này trước khi yêu cầu nhận xét."
+                  if "active_exam_id" in st.session_state else
+                  "Hãy bấm dấu + để đính kèm tài liệu, rồi nhập yêu cầu như ‘Tạo 10 câu hỏi’." )
+        messages.append({"role": "assistant", "content": answer})
+    st.rerun()
+
+
+def main():
+    st.set_page_config(page_title="MCQ Studio", page_icon="🎓", layout="wide")
+    st.markdown("""<style>
+        .block-container {max-width: 920px; padding-top: 2rem; padding-bottom: 7rem;}
+        [data-testid="stChatMessage"] {border-radius: 16px; padding: 1rem 1.25rem;}
+        .chat-hero {background: linear-gradient(120deg, #182a48, #385d7a); color: #fff;
+            border-radius: 22px; padding: 2rem 2.4rem; margin-bottom: 1.5rem;}
+        .chat-hero h1 {color: #fff; margin: .4rem 0; font-size: 2rem;}
+        .chat-hero p {color: #e2ebf4; margin: 0;}
+        .eyebrow {font-size: .75rem; font-weight: 700; letter-spacing: .16em; color: #8fe1d5;}
+    </style>""", unsafe_allow_html=True)
+    with st.sidebar:
+        st.title("🎓 MCQ Studio")
+        st.caption("Tài liệu → bộ đề → bài làm → nhận xét")
+        if st.button("+ Cuộc trò chuyện mới", use_container_width=True):
+            for key in ("messages", "active_exam_id", "active_attempt"):
+                st.session_state.pop(key, None)
+            st.rerun()
+        model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=1 if LARGE_MODEL.is_file() else 0)
+        model_path = MODEL_OPTIONS[model_alias]
+        st.caption("modelv1: 4B, nhẹ hơn · modelv2: 8B, ổn định hơn")
+        with st.expander("Tùy chỉnh prompt tạo đề"):
+            template = st.text_area("Prompt tạo đề", DEFAULT_PROMPT, height=240)
+        st.caption("Chạy local · dữ liệu lưu trong output/ · chưa có đăng nhập")
+    previous_alias = st.session_state.get("loaded_model_alias")
+    if previous_alias and previous_alias != model_alias:
+        load_model.clear()
+    st.session_state["loaded_model_alias"] = model_alias
+    chat_view(model_path, template)
 
 
 if __name__ == "__main__":
@@ -190,7 +475,7 @@ if __name__ == "__main__":
         llm = load_model()
         results = []
         count = int(sys.argv[2]) if len(sys.argv) > 2 else 1
-        for document in sorted(p for p in INPUT.iterdir() if p.suffix.lower() in {".pdf", ".docx", ".pptx"}):
+        for document in sorted(p for p in INPUT.iterdir() if p.suffix.lower() in DOCUMENT_TYPES):
             print(f"Đang xử lý {document.name}...", flush=True)
             try:
                 for question, prompt in generate_questions(llm, extract(document), count, DEFAULT_PROMPT):

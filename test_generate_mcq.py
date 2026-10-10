@@ -1,4 +1,5 @@
 import json
+import subprocess
 import sys
 import tempfile
 import types
@@ -35,6 +36,14 @@ class FakeBackend:
 def test_parsing_and_validation():
     assert pipeline.parse_json_text("<think>ignore</think>```json\n{\"ok\": true}\n```") == {"ok": True}
     assert pipeline.allocate_questions([{"text": "short"}, {"text": "x" * 200}], 3) == [0, 3]
+    assert pipeline.allocate_questions([{"text": "x" * 120, "source_types": ["row"]}], 2) == [2]
+    assert not pipeline.validate_mcq({**QUESTION, "source_type": "row", "source_index": 2}, {("row", 2)})
+    assert "bằng tiếng Việt" in pipeline.build_generator_prompt(
+        {"text": "SOURCE", "source_types": ["page"], "source_indices": [1]}, 1)
+    item = pipeline.mcq_schema_for_chunk({"source_types": ["page"], "source_indices": [4, 5]})[
+        "properties"]["questions"]["items"]["properties"]
+    assert item["source_index"]["enum"] == [4, 5]
+    assert item["source_type"]["enum"] == ["page"]
     broken = {**QUESTION, "correct_answer": []}
     assert pipeline.validate_mcq(broken, {("page", 1)})
 
@@ -48,6 +57,23 @@ def test_parsing_and_validation():
     backend = RetryBackend()
     assert pipeline.ask_json(backend, [{"role": "user", "content": "SOURCE:\ntext"}], {}, 800, 0.4) == {"questions": []}
     assert backend.calls == 2
+
+
+def test_csv_extraction():
+    processor = Path(__file__).resolve().parent / "build/doc_processor"
+    if not processor.is_file():
+        return
+    with tempfile.TemporaryDirectory() as directory:
+        source = Path(directory) / "sample.csv"
+        output = Path(directory) / "chunks.json"
+        source.write_text('topic,detail\nAlgebra,"comma, here"\nGeometry,"two\nlines"\nLogic,"said ""hi"""\n', encoding="utf-8")
+        subprocess.run([str(processor), str(source), "--output", str(output)], check=True, capture_output=True)
+        data = json.loads(output.read_text(encoding="utf-8"))
+        assert [(block["type"], block["index"]) for block in data["blocks"]] == [("row", 2), ("row", 3), ("row", 4)]
+        assert "comma, here" in data["blocks"][0]["text"]
+        assert "two\nlines" in data["blocks"][1]["text"]
+        assert 'said "hi"' in data["blocks"][2]["text"]
+        pipeline.validate_chunks(data)
 
 
 def test_cli_shared_pipeline():
@@ -197,6 +223,7 @@ def test_local_adapter_without_model_load():
 
 if __name__ == "__main__":
     test_parsing_and_validation()
+    test_csv_extraction()
     test_cli_shared_pipeline()
     test_transformers_adapter_without_gpu_download()
     test_local_adapter_without_model_load()
