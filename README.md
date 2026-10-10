@@ -9,7 +9,7 @@ C++ extract text
         ↓
 C++ chia chunk
         ↓
-Qwen3-4B/8B GGUF local hoặc Qwen3-8B Transformers 4-bit trên Kaggle
+Qwen3-1.7B/8B GGUF local hoặc Qwen3-8B Transformers 4-bit trên Kaggle
         ↓
 Python (model chỉ load 1 lần cho generator và verifier)
         ↓
@@ -89,14 +89,14 @@ Nếu máy thiếu dependency build hoặc CUDA compiler không tương thích, 
 
 ### Model nhẹ cho giao diện
 
-Có thể thử Qwen3-4B Q4_K_M GGUF (khoảng 2.5 GB) để giảm dung lượng:
+Giao diện mặc định dùng `modelv1`: Qwen3-1.7B Q4_K_M GGUF (khoảng 1.2 GB):
 
 ```bash
 pip install -U huggingface_hub
-hf download Qwen/Qwen3-4B-GGUF Qwen3-4B-Q4_K_M.gguf --local-dir models
+hf download ggml-org/Qwen3-1.7B-GGUF Qwen3-1.7B-Q4_K_M.gguf --local-dir models
 ```
 
-Giao diện mặc định chọn `modelv2` (`models/Qwen3-8B-Q4_K_M.gguf`) khi có; chọn `modelv1` để thử bản 4B. Trên PDF SVM mẫu, 4B đã tạo một số câu thiếu `source_index`/evidence hợp lệ, nên chưa coi chất lượng tương đương 8B. Nếu chỉ có 4B, giao diện tự chọn `modelv1`.
+`modelv2` vẫn dùng `models/Qwen3-8B-Q4_K_M.gguf` khi cần model mạnh hơn. Trên chunk SVM mẫu, modelv1 tạo một câu trong khoảng 23 giây sau khi load trên máy CPU thử nghiệm; thời gian và chất lượng có thể khác theo tài liệu.
 
 ### Model 8B cho CLI
 
@@ -130,17 +130,17 @@ streamlit run mcq_streamlit.py
 
 Mọi thao tác nằm trong **một cuộc trò chuyện**:
 
-1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Mỗi câu vẫn qua kiểm tra cấu trúc, evidence và semantic verifier.
-   Giao diện tạo tối đa 3 câu mỗi nhóm, phân bổ số câu theo độ dài chunk và dừng sau số nhóm đã phân bổ. Nếu model chỉ tạo được ít câu có căn cứ hơn yêu cầu, đề vẫn được lưu với số câu thực tế và lý do loại câu được hiển thị trong chat. Trên CPU, `modelv2` 8B vẫn có thể mất nhiều phút vì verifier phải đọc từng câu.
+1. Bấm dấu **+** trong ô chat để đính kèm PDF/DOC/DOCX/PPT/PPTX/CSV, nhập `Tạo 10 câu hỏi` rồi gửi. Nếu không ghi số câu, mặc định là 10 (tối đa 50). Mặc định giao diện tạo bản nháp nhanh: kiểm tra cấu trúc tối thiểu, giữ nguyên dẫn chứng và cả câu có thể trùng; không gọi verifier AI.
+   Bản nháp nhanh tạo từng câu để tránh một lượt suy luận quá dài; số câu được phân bổ theo độ dài chunk. Nếu model tạo ít câu hơn yêu cầu, đề vẫn được lưu với số câu thực tế. Có thể bật **Kiểm tra đáp án bằng AI** nếu muốn rà soát sâu hơn, nhưng sẽ chậm hơn.
 2. Khi đề hiện trong chat, bấm **Tải bộ đề TXT** để lưu bản chỉ gồm câu hỏi và lựa chọn. Đề JSON lưu ở `output/questions.json`, bản TXT ở `output/questions.txt`.
 3. Sinh viên nhập tên/mã, chọn đáp án và **Nộp bài** ngay trong thẻ đề. Kết quả lưu ở `output/attempts.json`.
 4. Nhập câu hỏi tiếp trong cùng ô chat, ví dụ `Nhận xét bài làm này và gợi ý phần cần ôn`. Chatbot dùng kết quả bài vừa nộp; nhận xét từ một bài kiểm tra không phải đánh giá năng lực toàn diện.
 
-Thanh bên cho phép đổi giữa `modelv1` (GGUF 4B, nhẹ hơn) và `modelv2` (GGUF 8B, mặc định), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
+Thanh bên cho phép đổi giữa `modelv1` (GGUF 1.7B, mặc định) và `modelv2` (GGUF 8B), chỉnh prompt tạo đề hoặc bắt đầu cuộc trò chuyện mới. Giao diện chưa có đăng nhập, chỉ dùng trên máy hoặc mạng tin cậy.
 
-Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B`, nhưng vẫn yêu cầu 4 lựa chọn, một đáp án hợp lệ và dẫn chứng có trong tài liệu để đề chấm được. Tắt **Kiểm tra đáp án bằng AI** để tạo bản nháp nhanh hơn; giảng viên phải rà soát đáp án trước khi giao bài. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
+Giao diện tự sửa các lỗi định dạng đơn giản như `b.` thành đáp án `B`, nhưng vẫn yêu cầu 4 lựa chọn và một đáp án hợp lệ để chấm được. Dẫn chứng và câu trùng trong bản nháp không được kiểm tra; giảng viên phải rà soát trước khi giao bài. Trong lúc tạo đề, nút gửi ở ô chat đổi thành **Dừng**. Nếu đã có câu được giữ, lần hiển thị tiếp theo sẽ cho tải phần đề đó.
 
-Model được cache để tạo đề, verifier và chat dùng cùng một bản trong RAM. Chạy CPU với 8B có thể chậm; dùng GGUF 4B hoặc GPU nếu có.
+Model được cache để tạo đề và chat dùng cùng một bản trong RAM. Chạy CPU với 8B có thể chậm; dùng modelv1 hoặc GPU nếu có.
 
 ### Chạy toàn pipeline
 

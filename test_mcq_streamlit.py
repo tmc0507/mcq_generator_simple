@@ -35,10 +35,10 @@ def test_app():
     progress = []
     questions = list(generate_questions(model, data, 3, "Câu {index}/{total}; nhóm {count}\n{source}",
                                         on_attempt=lambda attempt, accepted: progress.append((attempt, accepted))))
-    assert len(questions) == 1
-    assert model.calls == 1
-    assert progress == [(1, 0)]
-    assert "Câu 1/3; nhóm 3" in questions[0][1]
+    assert len(questions) == 3
+    assert model.calls == 3
+    assert progress == [(1, 0), (2, 1), (3, 2)]
+    assert "Câu 1/3; nhóm 1" in questions[0][1]
     assert "Dữ kiện gốc." in render_prompt("{source}", data["chunks"][0], 1, 3, [])
     app = AppTest.from_file("mcq_streamlit.py").run(timeout=30)
     assert not app.exception, app.exception
@@ -47,7 +47,7 @@ def test_app():
     assert set(app.chat_input[0].proto.file_type) == {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".csv"}
     assert app.selectbox[0].value in {"modelv1", "modelv2"}
     assert app.toggle[0].label == "Kiểm tra đáp án bằng AI"
-    assert app.toggle[0].value is True
+    assert app.toggle[0].value is False
     assert app.text_area[0].value
     app.chat_input[0].set_value("Tạo 3 câu hỏi").run(timeout=30)
     assert not app.exception, app.exception
@@ -101,6 +101,22 @@ def test_generation_has_bounded_batches_and_validates_each_question():
     assert duplicate_model.verifier_calls == 1
     assert duplicate_stats["duplicate"] == 2
 
+    draft = list(generate_questions(FakeModel(), data, 6, mcq_streamlit.DEFAULT_PROMPT, verify=False))
+    assert len(draft) == 6
+    assert draft[0][0]["question"] == draft[3][0]["question"]
+
+    class UncheckedEvidence(FakeModel):
+        def generate_text(self, messages, **kwargs):
+            result = json.loads(super().generate_text(messages, **kwargs))
+            result["questions"][0]["evidence"] = "Model trích dẫn không có trong tài liệu."
+            return json.dumps(result)
+
+    unchecked = list(generate_questions(UncheckedEvidence(), data, 1,
+                                        mcq_streamlit.DEFAULT_PROMPT, verify=False))
+    assert len(unchecked) == 1
+    assert unchecked[0][0]["evidence"] == "Model trích dẫn không có trong tài liệu."
+    assert unchecked[0][0]["evidence_score"] is None
+
 
 def test_exam_file_and_count():
     assert question_count("Tạo 10 câu hỏi") == 10
@@ -145,6 +161,7 @@ def test_exam_file_and_count():
             assert snapshots == [1]
             assert fast_exam["verification_enabled"] is False
             assert fast_exam["questions"][0]["verifier_status"] == "SKIPPED"
+            assert fast_exam["questions"][0]["evidence_score"] is None
             assert "BẢN NHÁP" in format_exam_txt(fast_exam)
     finally:
         (mcq_streamlit.EXAM, mcq_streamlit.EXAM_TXT,

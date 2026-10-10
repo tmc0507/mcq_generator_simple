@@ -15,9 +15,9 @@ import streamlit as st
 
 
 SOURCE = Path(__file__).resolve().parent
-SMALL_MODEL = SOURCE / "models/Qwen3-4B-Q4_K_M.gguf"
+SMALL_MODEL = SOURCE / "models/Qwen3-1.7B-Q4_K_M.gguf"
 LARGE_MODEL = SOURCE / "models/Qwen3-8B-Q4_K_M.gguf"
-MODEL = LARGE_MODEL if LARGE_MODEL.is_file() else SMALL_MODEL
+MODEL = SMALL_MODEL if SMALL_MODEL.is_file() else LARGE_MODEL
 INPUT = SOURCE / "input"
 OUTPUT = SOURCE / "output/mcq_questions.txt"
 EXAM = SOURCE / "output/questions.json"
@@ -32,7 +32,6 @@ from generate_mcq import (  # noqa: E402
     mcq_schema_for_chunk,
     ask_json,
     deduplicate,
-    evidence_score,
     validate_mcq,
     build_verifier_prompt,
     VERIFY_SCHEMA,
@@ -104,7 +103,7 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
     batches = []
     for chunk, quota in zip(chunks, allocate_questions(chunks, count)):
         while quota:
-            batch_size = min(3, quota)
+            batch_size = min(3 if verify else 1, quota)
             batches.append((chunk, batch_size))
             quota -= batch_size
     stats = stats if stats is not None else {}
@@ -123,8 +122,8 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                 [{"role": "system", "content": SYSTEM_PROMPT},
                  {"role": "user", "content": prompt}],
                 mcq_schema_for_chunk(chunk),
-                max_tokens=max(800, batch_size * 350),
-                temperature=0.3,
+                max_tokens=max(500, batch_size * 350),
+                temperature=0.3 if verify else 0.7,
             )
         except (ValueError, KeyError):
             stats["generator_error"] = stats.get("generator_error", 0) + 1
@@ -138,17 +137,25 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
             stats["empty"] = stats.get("empty", 0) + 1
         for question in questions[:batch_size]:
             question = normalize_mcq_format(question, chunk)
-            if validate_mcq(question, source_map):
+            if not verify:
+                question.setdefault("concept", "Chưa phân loại")
+                question.setdefault("difficulty", "easy")
+                question.setdefault("explanation", "")
+                question.setdefault("evidence", "")
+                question.setdefault("source_type", chunk["source_types"][0])
+                question.setdefault("source_index", chunk["source_indices"][0])
+            issues = validate_mcq(question, source_map)
+            if not verify:
+                issues = [issue for issue in issues if issue not in (
+                    "evidence rỗng", "explanation rỗng", "source không tồn tại trong tài liệu")]
+            if issues:
                 stats["structure"] = stats.get("structure", 0) + 1
                 continue
             source_key = (question["source_type"], question["source_index"])
-            if source_key not in zip(chunk["source_types"], chunk["source_indices"]):
+            if verify and source_key not in zip(chunk["source_types"], chunk["source_indices"]):
                 stats["structure"] = stats.get("structure", 0) + 1
                 continue
-            if evidence_score(question["evidence"], source_map[source_key]) < 0.75:
-                stats["evidence"] = stats.get("evidence", 0) + 1
-                continue
-            if len(deduplicate(accepted + [question])) == len(accepted):
+            if verify and len(deduplicate(accepted + [question])) == len(accepted):
                 stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
             if verify:
@@ -174,9 +181,6 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                     if revised_key not in zip(chunk["source_types"], chunk["source_indices"]):
                         stats["revision"] = stats.get("revision", 0) + 1
                         continue
-                    if evidence_score(revised["evidence"], source_map[revised_key]) < 0.75:
-                        stats["revision"] = stats.get("revision", 0) + 1
-                        continue
                     question = revised
                     source_key = revised_key
                 elif status != "PASS":
@@ -185,8 +189,8 @@ def generate_questions(llm, data, count, template, on_attempt=None, verify=False
                 question["verifier_status"] = status
             else:
                 question["verifier_status"] = "SKIPPED"
-            question["evidence_score"] = round(evidence_score(question["evidence"], source_map[source_key]), 4)
-            if len(deduplicate(accepted + [question])) == len(accepted):
+            question["evidence_score"] = None
+            if verify and len(deduplicate(accepted + [question])) == len(accepted):
                 stats["duplicate"] = stats.get("duplicate", 0) + 1
                 continue
             accepted.append(question)
@@ -227,7 +231,7 @@ def question_count(prompt):
 def format_exam_txt(exam):
     lines = [f"BỘ ĐỀ: {exam['document']}", f"Số câu: {len(exam['questions'])}", ""]
     if exam.get("verification_enabled") is False:
-        lines.insert(1, "BẢN NHÁP: Chưa kiểm tra đáp án bằng AI; giảng viên cần rà soát.")
+        lines.insert(1, "BẢN NHÁP: Chưa kiểm tra đáp án, dẫn chứng hoặc câu trùng; giảng viên cần rà soát.")
     for position, question in enumerate(exam["questions"], 1):
         lines.append(f"Câu {position}. {question['question']}")
         lines.extend(f"{letter}. {question['choices'][letter]}" for letter in "ABCD")
@@ -235,7 +239,7 @@ def format_exam_txt(exam):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=True, on_question=None):
+def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=False, on_question=None):
     if not Path(model_path).is_file():
         raise FileNotFoundError(f"Không tìm thấy model: {model_path}")
     document_name = Path(uploaded.name).name
@@ -263,7 +267,7 @@ def create_exam(uploaded, model_path, count, template, on_attempt=None, verify=T
         if on_question:
             on_question(exam)
     if not questions:
-        raise ValueError("Không tạo được câu hỏi có căn cứ; thử tài liệu có nhiều nội dung hơn.")
+        raise ValueError("Không tạo được câu hỏi có cấu trúc dùng được; thử tài liệu có nhiều nội dung hơn.")
     write_json(EXAM, exam)
     save_results(results)
     EXAM_TXT.parent.mkdir(parents=True, exist_ok=True)
@@ -372,17 +376,17 @@ def render_exam_message(message):
     with st.chat_message("assistant", avatar="🎓"):
         st.write(f"Đã tạo **{len(exam['questions'])} câu hỏi** từ **{exam['document']}**. Tải đề TXT hoặc làm bài ngay dưới đây.")
         if exam.get("verification_enabled") is False:
-            st.info("Bản nháp nhanh: chưa kiểm tra đáp án và giải thích bằng AI. Giảng viên nên rà soát trước khi giao bài.")
+            st.info("Bản nháp nhanh: giữ nguyên dẫn chứng và cả câu có thể trùng; chưa kiểm tra đáp án. Giảng viên nên rà soát trước khi giao bài.")
         if len(exam["questions"]) < exam.get("requested_questions", len(exam["questions"])):
             stats = exam.get("generation_stats", {})
             st.warning(
-                f"Chỉ giữ {len(exam['questions'])}/{exam['requested_questions']} câu đủ căn cứ "
+                f"Chỉ giữ {len(exam['questions'])}/{exam['requested_questions']} câu dùng được "
                 f"sau {stats.get('batches', '?')} nhóm tạo đề. "
-                "Không thêm câu thiếu căn cứ để đủ số lượng."
+                "Model không tạo đủ số câu được yêu cầu."
             )
             st.caption(
                 f"Model tạo {stats.get('generated', '?')} câu; loại do cấu trúc: {stats.get('structure', 0)}, "
-                f"dẫn chứng: {stats.get('evidence', 0)}, kiểm tra nội dung: "
+                f"kiểm tra nội dung: "
                 f"{stats.get('verifier_reject', 0) + stats.get('verifier_error', 0) + stats.get('revision', 0)}, "
                 f"trùng lặp: {stats.get('duplicate', 0)}."
             )
@@ -433,7 +437,7 @@ def render_exam_message(message):
             st.rerun()
 
 
-def chat_view(model_path, template, verify=True):
+def chat_view(model_path, template, verify=False):
     st.markdown('<div class="chat-hero"><div class="eyebrow">TRỢ LÝ HỌC TẬP</div><h1>Tạo đề và nhận xét trong một cuộc trò chuyện</h1><p>Đính kèm tài liệu bằng dấu +, làm bài và hỏi tiếp ngay tại đây.</p></div>', unsafe_allow_html=True)
     messages = st.session_state.setdefault("messages", [])
     stopped = st.session_state.pop("generating_exam", False)
@@ -539,13 +543,13 @@ def main():
             for key in ("messages", "active_exam_id", "active_attempt", "partial_exam", "generating_exam"):
                 st.session_state.pop(key, None)
             st.rerun()
-        model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=1 if LARGE_MODEL.is_file() else 0)
+        model_alias = st.selectbox("Model", list(MODEL_OPTIONS), index=0 if SMALL_MODEL.is_file() else 1)
         model_path = MODEL_OPTIONS[model_alias]
-        st.caption("modelv1: 4B, nhẹ hơn · modelv2: 8B, ổn định hơn")
+        st.caption("modelv1: 1.7B, nhanh hơn · modelv2: 8B, mạnh hơn")
         with st.expander("Tùy chỉnh prompt tạo đề"):
             template = st.text_area("Prompt tạo đề", DEFAULT_PROMPT, height=240)
-        verify = st.toggle("Kiểm tra đáp án bằng AI", value=True,
-                           help="Tắt để tạo bản nháp nhanh hơn; cần giảng viên rà soát đáp án trước khi giao bài.")
+        verify = st.toggle("Kiểm tra đáp án bằng AI", value=False,
+                           help="Mặc định tắt để tạo nhanh; bật nếu muốn model kiểm tra sâu từng câu.")
         st.caption("Nút Dừng xuất hiện khi đang tạo đề; lượt suy luận hiện tại có thể cần chạy xong trước khi dừng.")
         st.caption("Chạy local · dữ liệu lưu trong output/ · chưa có đăng nhập")
     previous_alias = st.session_state.get("loaded_model_alias")
