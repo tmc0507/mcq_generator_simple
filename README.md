@@ -19,7 +19,7 @@
 
 Cần Python 3, CMake, trình biên dịch C++, Poppler và unzip. Với file DOC/PPT cũ, cài thêm LibreOffice.
 
-    
+    TẢI MODEL VỀ MÁY BỎ VAO FOLDER MODEL
     https://drive.google.com/drive/folders/1aeogV0naaJXpfwNbGDlzKCgCKVbc8d8P?usp=drive_link
     
     
