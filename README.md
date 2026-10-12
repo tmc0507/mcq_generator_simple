@@ -19,6 +19,10 @@
 
 Cần Python 3, CMake, trình biên dịch C++, Poppler và unzip. Với file DOC/PPT cũ, cài thêm LibreOffice.
 
+    
+    https://drive.google.com/drive/folders/1aeogV0naaJXpfwNbGDlzKCgCKVbc8d8P?usp=drive_link
+    
+    
     sudo apt install build-essential cmake poppler-utils unzip python3-venv
     python3 -m venv .venv
     source .venv/bin/activate
